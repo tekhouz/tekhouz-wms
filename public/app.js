@@ -20,8 +20,17 @@ async function api(method, path, body, isFile) {
   if (isFile) { opts.body = body; }
   else if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const r = await fetch(path, opts);
-  const data = await r.json();
   if (r.status === 401) { doLogout(); return; }
+  // Safely parse — server might return HTML on crash/404
+  const ct = r.headers.get('content-type') || '';
+  let data;
+  if (ct.includes('application/json')) {
+    data = await r.json();
+  } else {
+    const text = await r.text();
+    if (!r.ok) throw new Error(`Server error ${r.status}: ${text.replace(/<[^>]+>/g,'').trim().slice(0,120)}`);
+    throw new Error(`Unexpected response (${r.status})`);
+  }
   if (!r.ok) throw new Error(data.error || 'Request failed');
   return data;
 }
@@ -87,6 +96,38 @@ function nav(screen) {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 function fmt(v) { return v || '—'; }
+
+// Replace the grade segment in a SKU string (e.g. ipad-7th-32gb-SG-A → ipad-7th-32gb-SG-A+)
+// Grades are checked longest-first so "D-Fixable" is matched before "D" etc.
+function updateSkuGrade(sku, newGrade) {
+  if (!sku || !newGrade) return sku;
+  const grades = ['A+','A','B+','B','C','D-Fixable','D-Parts','S-Scrap'];
+  const upper = sku.toUpperCase();
+  for (const g of grades) {
+    if (upper.endsWith('-' + g.toUpperCase())) {
+      // Strip the old grade (keep the trailing dash from the prefix)
+      return sku.slice(0, sku.length - g.length) + newGrade;
+    }
+  }
+  // No recognised grade at the end — just append
+  return sku + '-' + newGrade;
+}
+
+// Live preview shown below the Overall Grade dropdown in the testing modal
+function previewSkuGrade() {
+  const grade = document.getElementById('t-overall_grade')?.value;
+  const currentSku = document.getElementById('t-current-sku')?.value;
+  const preview = document.getElementById('sku-grade-preview');
+  if (!preview) return;
+  if (!grade || !currentSku) { preview.innerHTML = ''; return; }
+  const newSku = updateSkuGrade(currentSku, grade);
+  const changed = newSku !== currentSku;
+  const gradeColors = { 'A+':'#15803d', A:'#22c55e', 'B+':'#0ea5e9', B:'#3b82f6', C:'#f59e0b', 'D-Fixable':'#f97316', 'D-Parts':'#ef4444', 'S-Scrap':'#7f1d1d' };
+  const col = gradeColors[grade] || '#64748b';
+  preview.innerHTML = changed
+    ? `<span style="color:var(--muted)">SKU will update to: </span><span style="font-family:monospace;font-weight:700;color:${col}">${esc(newSku)}</span>`
+    : `<span style="color:var(--muted);font-style:italic">SKU unchanged</span>`;
+}
 function fmtPrice(v) { return v ? '$' + parseFloat(v).toFixed(2) : '—'; }
 function fmtDate(v) {
   if (!v) return '—';
@@ -192,11 +233,11 @@ async function renderDashboard(period) {
       </div>`).join('') || '<p style="color:var(--muted);font-size:13px">No inventory</p>';
 
     // ── Grade Distribution ───────────────────────────────────────
-    const gradeColors = { A:'var(--green)', B:'var(--blue)', C:'var(--amber)', D:'var(--red)', New:'var(--cyan)', Scrap:'var(--muted)', Unknown:'var(--muted)' };
+    const gradeColors = { 'A+':'#15803d', A:'#22c55e', 'B+':'#0ea5e9', B:'#3b82f6', C:'#f59e0b', 'D-Fixable':'#f97316', 'D-Parts':'#ef4444', 'S-Scrap':'#7f1d1d', Unknown:'var(--muted)' };
     const maxGrade = Math.max(...d.inventory.grades.map(x => x.count), 1);
     const gradeRows = d.inventory.grades.map(x => `
       <div style="display:flex;align-items:center;gap:10px;padding:5px 0;border-bottom:1px solid #f1f5f9">
-        <div style="width:70px;font-size:13px;font-weight:700;color:${gradeColors[x.grade]||'var(--muted)'};flex-shrink:0">Grade ${x.grade}</div>
+        <div style="min-width:80px;font-size:12px;font-weight:700;color:${gradeColors[x.grade]||'var(--muted)'};flex-shrink:0">${x.grade}</div>
         <div style="flex:1">${pctBar(x.count, maxGrade, gradeColors[x.grade]||'var(--muted)')}</div>
         <div style="font-size:13px;font-weight:700;min-width:36px;text-align:right">${x.count}</div>
       </div>`).join('') || '<p style="color:var(--muted);font-size:13px">No graded items</p>';
@@ -678,7 +719,7 @@ async function doScanLookup() {
     _scanResult = await api('GET', `/api/inventory/scan?q=${encodeURIComponent(val)}`);
     const inv = _scanResult;
     const grade = inv.overall_grade || inv.tested_grade || inv.grade || '—';
-    const gradeColor = { A:'var(--green)', B:'var(--blue)', C:'var(--amber)', D:'var(--red)', Working:'var(--green)', 'Not Working':'var(--red)' }[grade] || 'var(--muted)';
+    const gradeColor = { 'A+':'#15803d', A:'#22c55e', 'B+':'#0ea5e9', B:'#3b82f6', C:'#f59e0b', 'D-Fixable':'#f97316', 'D-Parts':'#ef4444', 'S-Scrap':'#7f1d1d' }[grade] || 'var(--muted)';
     const serial = inv.serial_number || inv.imei || '—';
 
     resultArea.innerHTML = `
@@ -694,7 +735,27 @@ async function doScanLookup() {
         </div>
       </div>`;
 
-    // Load pending orders without a serial for assignment
+    // ── Block if already sold ─────────────────────────────────────────────
+    if (inv.status === 'sold') {
+      const soldInfo = inv.sold_to_order_ref
+        ? `Order <strong>#${esc(inv.sold_to_order_ref)}</strong>${inv.sold_date ? ` on ${fmtDate(inv.sold_date)}` : ''}`
+        : 'a previous order';
+      document.getElementById('scan-order-area').innerHTML = `
+        <div style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:var(--r);padding:14px;display:flex;gap:12px;align-items:flex-start;margin-top:12px">
+          <svg width="22" height="22" fill="none" stroke="#ea580c" viewBox="0 0 24 24" stroke-width="2" style="flex-shrink:0;margin-top:1px"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          <div>
+            <div style="font-weight:700;color:#9a3412;font-size:13px">Device Already Sold</div>
+            <div style="font-size:12px;color:#c2410c;margin-top:3px">
+              Serial <strong>${esc(serial)}</strong> has already been assigned to ${soldInfo}.<br>
+              Cannot assign to another order.
+            </div>
+          </div>
+        </div>`;
+      document.getElementById('scan-footer').innerHTML = `<button class="btn btn-outline" onclick="closeModal()">Close</button>`;
+      return;
+    }
+
+    // Load pending orders for assignment
     await loadOrdersForScan(serial);
 
   } catch(ex) {
@@ -714,52 +775,68 @@ async function loadOrdersForScan(serial) {
   const orderArea = document.getElementById('scan-order-area');
   orderArea.innerHTML = `<div style="text-align:center;padding:12px"><div class="loader"></div></div>`;
   try {
-    const d = await api('GET', '/api/orders?limit=100');
-    // Show all orders, highlighting ones without a serial (needs assignment)
-    const orders = d.orders.slice(0, 50);
-    if (!orders.length) { orderArea.innerHTML = `<p style="color:var(--muted);font-size:13px">No orders found.</p>`; return; }
+    const d = await api('GET', '/api/orders?limit=200');
+    // Only show orders that have NO serial yet (available for assignment)
+    const available = d.orders.filter(o => !o.serial_no);
+    // Also show orders that already have THIS serial (already assigned — show as done)
+    const alreadyThisSerial = d.orders.filter(o => o.serial_no === serial);
 
-    const rows = orders.map(o => {
-      const hasSerial = !!o.serial_no;
-      return `<tr style="cursor:pointer;${hasSerial?'opacity:.5':''}">
-        <td onclick="assignScanToOrder(${o.id},'${esc(serial).replace(/'/g,"\\'")}')">
-          <span class="tag" style="font-size:11px">${esc(o.source)}</span>
-        </td>
-        <td onclick="assignScanToOrder(${o.id},'${esc(serial).replace(/'/g,"\\'")}')">
-          <strong class="mono" style="font-size:12px">${esc(o.order_id)}</strong>
-        </td>
-        <td onclick="assignScanToOrder(${o.id},'${esc(serial).replace(/'/g,"\\'")}')">
-          <div style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${esc(o.item_name)}</div>
-        </td>
-        <td onclick="assignScanToOrder(${o.id},'${esc(serial).replace(/'/g,"\\'")}')">
-          ${hasSerial
-            ? `<span class="mono" style="font-size:11px;color:var(--muted)">${esc(o.serial_no)}</span>`
-            : `<span style="font-size:11px;color:var(--amber);font-style:italic">— no serial —</span>`}
-        </td>
-        <td style="font-size:11px;color:var(--muted)">${(o.import_date||'').slice(5)}</td>
+    if (alreadyThisSerial.length) {
+      orderArea.innerHTML = `
+        <div style="background:#f0fdf4;border:1.5px solid #bbf7d0;border-radius:var(--r);padding:14px;display:flex;gap:12px;align-items:center;margin-top:10px">
+          <svg width="20" height="20" fill="none" stroke="#16a34a" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          <div>
+            <div style="font-weight:700;color:#15803d">Already Assigned</div>
+            <div style="font-size:12px;color:#166534;margin-top:2px">
+              Serial <strong>${esc(serial)}</strong> is already linked to order <strong>#${esc(alreadyThisSerial[0].order_id)}</strong>.
+            </div>
+          </div>
+        </div>`;
+      document.getElementById('scan-footer').innerHTML = `<button class="btn btn-outline" onclick="closeModal()">Close</button>`;
+      return;
+    }
+
+    if (!available.length) {
+      orderArea.innerHTML = `
+        <div style="text-align:center;color:var(--muted);padding:16px;font-size:13px">
+          No open orders without a serial number.<br>All orders already have serials assigned.
+        </div>`;
+      document.getElementById('scan-footer').innerHTML = `<button class="btn btn-outline" onclick="closeModal()">Close</button>`;
+      return;
+    }
+
+    const safeSerial = serial.replace(/'/g, "\\'");
+    const rows = available.map(o => `
+      <tr id="scan-order-row-${o.id}" style="cursor:pointer" onclick="assignScanToOrder(${o.id},'${safeSerial}')">
+        <td><span class="tag" style="font-size:11px">${esc(o.source)}</span></td>
+        <td><strong class="mono" style="font-size:12px">${esc(o.order_id)}</strong></td>
+        <td><div style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">${esc(o.item_name)}</div></td>
+        <td style="font-size:11px;color:var(--muted)">${fmtDate(o.import_date)}</td>
         <td>
-          <button class="btn btn-primary btn-sm" onclick="assignScanToOrder(${o.id},'${esc(serial).replace(/'/g,"\\'")}')">
+          <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();assignScanToOrder(${o.id},'${safeSerial}')">
             Assign
           </button>
         </td>
-      </tr>`;
-    }).join('');
+      </tr>`).join('');
 
     orderArea.innerHTML = `
-      <div style="font-size:12px;font-weight:600;color:var(--txt);margin-bottom:8px">
-        Select order row to assign serial <span class="mono" style="color:var(--blue)">${esc(serial)}</span>:
-      </div>
-      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Rows with no serial shown first — click any row or "Assign" to link.</div>
-      <div class="table-wrap" style="box-shadow:none;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)">
-        <table class="table-compact">
-          <thead><tr><th>Source</th><th>Order ID</th><th>Item</th><th>Current Serial</th><th>Date</th><th></th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+      <div style="margin-top:12px">
+        <div style="font-size:12px;font-weight:600;color:var(--txt);margin-bottom:6px">
+          Assign <span class="mono" style="color:var(--blue)">${esc(serial)}</span> to which order?
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${available.length} open order${available.length!==1?'s':''} without a serial</div>
+        <div id="scan-assign-error"></div>
+        <div class="table-wrap" style="box-shadow:none;max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)">
+          <table class="table-compact">
+            <thead><tr><th>Source</th><th>Order ID</th><th>Item</th><th>Date</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
       </div>`;
 
     document.getElementById('scan-footer').innerHTML = `
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <div style="font-size:12px;color:var(--muted)">Click a row to assign the serial number</div>`;
+      <div style="font-size:12px;color:var(--muted)">Click a row or Assign button to link serial</div>`;
 
   } catch(ex) {
     orderArea.innerHTML = `<div class="alert alert-error">${ex.message}</div>`;
@@ -767,12 +844,33 @@ async function loadOrdersForScan(serial) {
 }
 
 async function assignScanToOrder(orderId, serial) {
+  // Disable the clicked row to prevent double-clicks
+  const row = document.getElementById('scan-order-row-' + orderId);
+  if (row) { row.style.opacity = '0.5'; row.style.pointerEvents = 'none'; }
+
   try {
-    await api('PUT', `/api/orders/${orderId}`, { serial_no: serial });
-    showToast(`✓ Serial ${serial} assigned to order`);
+    const result = await api('POST', `/api/orders/${orderId}/assign-serial`, { serial });
+    const toastMsg = result.inventory_updated
+      ? `✓ Serial assigned & inventory marked as sold`
+      : `✓ Serial ${serial} assigned to order`;
+    showToast(toastMsg);
     closeModal();
     loadOrders();
-  } catch(ex) { showToast(ex.message, 'error'); }
+  } catch(ex) {
+    // Re-enable the row on error
+    if (row) { row.style.opacity = ''; row.style.pointerEvents = ''; }
+    // Show inline error in the assign area
+    const errEl = document.getElementById('scan-assign-error');
+    if (errEl) {
+      errEl.innerHTML = `
+        <div style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:var(--r);padding:10px 14px;display:flex;gap:10px;align-items:center;margin-bottom:10px">
+          <svg width="18" height="18" fill="none" stroke="var(--red)" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+          <div style="font-weight:600;color:var(--red);font-size:12px">${esc(ex.message)}</div>
+        </div>`;
+    } else {
+      showToast(ex.message, 'error');
+    }
+  }
 }
 
 // ─── Order Testing Modal ──────────────────────────────────────────────────
@@ -944,7 +1042,10 @@ async function loadInventory() {
     const vendorOpts = d.vendors.map(v=>`<option value="${v}" ${S.iFilters.vendor===v?'selected':''}>${esc(v)}</option>`).join('');
     const typeOpts = d.types.map(t=>`<option value="${t}" ${S.iFilters.device_type===t?'selected':''}>${t}</option>`).join('');
 
-    const overallGradeMap = {'Working':'pass','Not Working':'fail','Partial Working':'ready','For Parts':'pending','Scrap':'fail'};
+    // Final Cosmetic Grade (functional status) → badge class
+    const finalGradeMap = { 'Working':'pass','Partial Working':'ready','Not Working':'fail','On Hold':'pending','Parts':'pending','Scrap':'fail' };
+    // Overall Grade letter scale → hex color
+    const cosC = { 'A+':'#15803d', A:'#22c55e', 'B+':'#0ea5e9', B:'#3b82f6', C:'#f59e0b', 'D-Fixable':'#f97316', 'D-Parts':'#ef4444', 'S-Scrap':'#7f1d1d' };
     const lockMap = v => {
       if (!v) return '—';
       const lo = v.toLowerCase();
@@ -952,107 +1053,184 @@ async function loadInventory() {
       return `<span class="badge badge-pending" style="font-size:10px">${esc(v)}</span>`;
     };
 
-    const rows = d.items.map(item => {
-      const hasTesting = !!item.test_id;
-      const testItems = [
-        ['LCD/Display','lcd_test'],['Touch Screen','touch_test'],['Face ID / Home','face_id_test'],
-        ['Fingerprint','fingerprint_test'],['Front Camera','front_camera_test'],['Rear Camera','rear_camera_test'],
-        ['Speaker','speaker_test'],['Microphone','mic_test'],['WiFi','wifi_test'],
-        ['Cellular','cellular_test'],['Bluetooth','bluetooth_test'],['Charging','charging_test'],
-        ['Vibration','vibration_test'],['Keyboard','keyboard_test'],['Trackpad','trackpad_test'],
-        ['USB Ports','usb_ports_test'],['Hinge/Lid','hinge_test']
-      ];
-      const detailHtml = hasTesting ? `
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-bottom:14px">
-          ${testItems.map(([label, key]) => {
-            const v = item[key];
-            if (!v || v==='Not Tested') return '';
-            const cls = {Pass:'badge-pass',Fail:'badge-fail','N/A':'badge-na'}[v]||'badge-not-tested';
-            return `<div style="background:#fff;border:1px solid var(--border);border-radius:6px;padding:8px">
-              <div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:4px">${label}</div>
-              <span class="badge ${cls}">${v}</span>
-            </div>`;
-          }).join('')}
-        </div>
-        <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:12px;padding-top:10px;border-top:1px solid var(--border)">
-          ${item.battery_health ? `<div><span style="color:var(--muted)">Battery:</span> <strong>${item.battery_health}%</strong>${item.battery_cycles?` / ${item.battery_cycles} cycles`:''}</div>` : ''}
-          ${item.mdm_lock==='On' ? `<div><span style="color:var(--muted)">MDM Lock:</span> <span class="badge badge-fail">ON</span></div>` : ''}
-          ${item.d_grade_description ? `<div><span style="color:var(--muted)">D Grade:</span> <strong style="color:var(--red)">${esc(item.d_grade_description)}</strong></div>` : ''}
-          ${item.test_notes ? `<div><span style="color:var(--muted)">Notes:</span> ${esc(item.test_notes)}</div>` : ''}
-        </div>` :
-        `<div style="text-align:center;color:var(--muted);padding:16px;font-size:13px">No testing results yet — click ✏ to add testing.</div>`;
+    // ── Type tab counts ──────────────────────────────────────────────────────
+    if (!S._iTypeTab) S._iTypeTab = 'all';
+    const typeCounts = { all: d.items.length };
+    d.items.forEach(it => { const t = it.device_type||'Other'; typeCounts[t] = (typeCounts[t]||0)+1; });
+    const typeOrder = ['iPhone','iPad','MacBook','Samsung','Laptop','Tablet','Smartphone','Gaming Console','Smartwatch','Other'];
+    const presentTypes = typeOrder.filter(t => typeCounts[t]).concat(Object.keys(typeCounts).filter(t => t!=='all' && !typeOrder.includes(t) && typeCounts[t]));
+    const typeTabIcons = { iPhone:'📱', iPad:'📱', MacBook:'💻', Samsung:'📱', Laptop:'💻', Tablet:'📱', Smartphone:'📱', 'Gaming Console':'🎮', Smartwatch:'⌚', Other:'📦' };
 
-      return `
-        <tr id="inv-row-${item.id}">
-          <td style="min-width:110px">
-            <div style="font-weight:600;font-size:12px">${esc(item.vendor)}</div>
-            <div style="color:var(--muted);font-size:11px">${esc(item.month)} ${item.year}</div>
-            ${item.lot_id?`<div class="mono" style="font-size:10px;color:var(--blue)">${esc(item.lot_id)}</div>`:''}
-          </td>
-          <td><span class="chip ${deviceTypeClass(item.device_type)}" style="font-size:11px;padding:2px 6px">${typeIcon(item.device_type)} ${item.device_type}</span></td>
-          <td style="min-width:130px">
-            <div style="font-weight:600;font-size:12px;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(item.model||'')}">${esc(item.model||'—')}</div>
-            ${item.sku?`<div class="mono" style="font-size:10px;color:var(--muted)">${esc(item.sku)}</div>`:''}
-          </td>
-          <td style="min-width:110px">
-            <div class="mono" style="font-size:11px">${esc(item.serial_number||'—')}</div>
-            ${item.imei?`<div class="mono" style="font-size:10px;color:var(--muted)">${esc(item.imei)}</div>`:''}
-          </td>
-          <td style="min-width:100px;font-size:11px">
-            ${item.color?`<div style="color:var(--txt)">${esc(item.color)}</div>`:''}
-            <div style="display:flex;gap:2px;flex-wrap:wrap;margin-top:1px">
-              ${item.storage?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.storage)}</span>`:''}
-              ${item.ram?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.ram)}</span>`:''}
-              ${item.wifi_cellular?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.wifi_cellular)}</span>`:''}
+    // ── Filter items by active type tab ─────────────────────────────────────
+    const displayItems = S._iTypeTab === 'all' ? d.items : d.items.filter(it => (it.device_type||'Other') === S._iTypeTab);
+
+    // ── Group filtered items by model ───────────────────────────────────────
+    const groupMap = {};
+    displayItems.forEach(item => {
+      const key = (item.model||'Unknown');
+      if (!groupMap[key]) groupMap[key] = { type: item.device_type||'Unknown', model: item.model||'Unknown', items: [] };
+      groupMap[key].items.push(item);
+    });
+    const safeId = k => k.replace(/[^a-zA-Z0-9]/g, '_');
+
+    // ── Grade distribution bar + pills for a model group ────────────────────
+    const gradeSummary = items => {
+      const dist = {};
+      items.forEach(it => { const g = it.overall_grade||it.cosmetic_grade||it.grade||it.condition_grade; if(g) dist[g]=(dist[g]||0)+1; });
+      const untested = items.filter(it => !it.overall_grade && !it.cosmetic_grade && !it.grade && !it.condition_grade && it.status !== 'sold').length;
+      const soldCount = items.filter(it => it.status === 'sold').length;
+      const total = items.length;
+      const gradeOrder = ['A+','A','B+','B','C','D-Fixable','D-Parts','S-Scrap'];
+      const barSegs = gradeOrder.filter(g=>dist[g]).map(g => {
+        const pct = Math.round(dist[g]/total*100);
+        return `<div style="width:${pct}%;background:${cosC[g]};min-width:3px" title="Grade ${g}: ${dist[g]}"></div>`;
+      }).join('');
+      const untestedPct = untested ? Math.round(untested/total*100) : 0;
+      const bar = `<div class="inv-grade-bar">${barSegs}${untestedPct?`<div style="width:${untestedPct}%;background:#d1d5db" title="Untested: ${untested}"></div>`:''}</div>`;
+      const pills = gradeOrder.filter(g=>dist[g]).map(g =>
+        `<span class="inv-grade-pill" style="background:${cosC[g]}18;color:${cosC[g]};border-color:${cosC[g]}44">Grade ${g} <strong>${dist[g]}</strong></span>`
+      ).join('') + (untested ? `<span class="inv-grade-pill" style="background:#f1f5f9;color:#6b7280;border-color:#d1d5db">Untested <strong>${untested}</strong></span>` : '');
+      const soldPill = soldCount ? `<span class="inv-grade-pill" style="background:#fef9c3;color:#854d0e;border-color:#fde047">Sold <strong>${soldCount}</strong></span>` : '';
+      return bar + `<div class="inv-grade-pills">${pills}${soldPill}</div>`;
+    };
+
+    const testItems = [
+      ['LCD/Display','lcd_test'],['Touch Screen','touch_test'],['Face ID / Home','face_id_test'],
+      ['Fingerprint','fingerprint_test'],['Front Camera','front_camera_test'],['Rear Camera','rear_camera_test'],
+      ['Speaker','speaker_test'],['Microphone','mic_test'],['WiFi','wifi_test'],
+      ['Cellular','cellular_test'],['Bluetooth','bluetooth_test'],['Charging','charging_test'],
+      ['Vibration','vibration_test'],['Keyboard','keyboard_test'],['Trackpad','trackpad_test'],
+      ['USB Ports','usb_ports_test'],['Hinge/Lid','hinge_test']
+    ];
+
+    // ── Build model accordion cards ─────────────────────────────────────────
+    let cardsHtml = '';
+    if (displayItems.length === 0) {
+      cardsHtml = `<div class="empty-state"><p>No inventory found for this filter.</p></div>`;
+    } else {
+      Object.entries(groupMap).forEach(([key, group]) => {
+        const gid = safeId(key);
+        let unitRows = '';
+        group.items.forEach(item => {
+          const hasTesting = !!item.test_id;
+          const cosGrade = item.overall_grade || item.cosmetic_grade || item.grade || item.condition_grade;
+          const cosColor = cosC[cosGrade] || '#9ca3af';
+          const detailHtml = hasTesting ? `
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-bottom:14px">
+              ${testItems.map(([label,k]) => {
+                const v = item[k]; if (!v||v==='Not Tested') return '';
+                const cls={Pass:'badge-pass',Fail:'badge-fail','N/A':'badge-na'}[v]||'badge-not-tested';
+                return `<div style="background:#fff;border:1px solid var(--border);border-radius:6px;padding:8px"><div style="font-size:10px;font-weight:600;color:var(--muted);margin-bottom:4px">${label}</div><span class="badge ${cls}">${v}</span></div>`;
+              }).join('')}
             </div>
-          </td>
-          <td style="min-width:90px">
-            ${lockMap(item.lock_status)}
-            ${item.carrier&&item.carrier!==item.lock_status?`<div style="font-size:10px;color:var(--muted)">${esc(item.carrier)}</div>`:''}
-            ${item.mdm_lock==='On'?`<span class="badge badge-fail" style="font-size:9px;margin-top:2px;display:inline-block">MDM ON</span>`:''}
-          </td>
-          <td style="min-width:90px">
-            <div>${gradeBadge(item.grade||item.condition_grade)}</div>
-            <div style="margin-top:3px">
-              ${item.overall_grade
-                ? `<span class="badge badge-${overallGradeMap[item.overall_grade]||'na'}" style="font-size:10px">${item.overall_grade}</span>`
-                : (hasTesting?'':'<span class="badge badge-not-tested" style="font-size:10px">Untested</span>')}
-            </div>
-            ${item.test_date?`<div style="font-size:10px;color:var(--muted);margin-top:2px">${fmtDate(item.test_date)}</div>`:''}
-          </td>
-          <td>
-            <div style="display:flex;gap:3px;align-items:center">
-              <button id="inv-exp-${item.id}" class="btn btn-outline btn-sm btn-icon" onclick="toggleInvDetail(${item.id})" title="Show test details" style="font-size:10px;padding:3px 6px">▶</button>
-              <button class="btn btn-outline btn-sm btn-icon" title="Print Label" onclick="showInventoryLabel(${item.id})" style="color:var(--purple);border-color:var(--purple)">
-                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
-              </button>
-              <button class="btn btn-primary btn-sm btn-icon" title="Test/Update" onclick="openInventoryTesting(${item.id})">
-                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-              </button>
-              ${S.user.role==='admin'?`<button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="deleteInventory(${item.id})"><svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`:''}
-            </div>
-          </td>
-        </tr>
-        <tr id="inv-det-${item.id}" style="display:none">
-          <td colspan="8" style="padding:0;background:#f0f7ff;border-bottom:2px solid var(--blue)">
-            <div style="padding:14px 16px">
-              <div style="font-size:11px;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">
-                Test Results — ${esc(item.model||item.device_type)}
-                ${item.testing_owner||item.tested_by?`<span style="font-weight:400;color:var(--muted);margin-left:8px">by ${esc(item.testing_owner||item.tested_by)}</span>`:''}
-                ${item.d_grade_description?`<span style="color:var(--red);margin-left:8px">⚠ ${esc(item.d_grade_description)}</span>`:''}
-              </div>
-              ${detailHtml}
-            </div>
-          </td>
-        </tr>`;
-    }).join('') || `<tr><td colspan="8"><div class="empty-state"><p>No inventory found.</p></div></td></tr>`;
+            <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:12px;padding-top:10px;border-top:1px solid #c7d2fe">
+              ${item.battery_health?`<div><span style="color:var(--muted)">Battery:</span> <strong>${item.battery_health}%</strong>${item.battery_cycles?` / ${item.battery_cycles} cycles`:''}</div>`:''}
+              ${item.mdm_lock==='On'?`<div><span style="color:var(--muted)">MDM:</span> <span class="badge badge-fail">ON</span></div>`:''}
+              ${item.d_grade_description?`<div><span style="color:var(--muted)">D Note:</span> <strong style="color:var(--red)">${esc(item.d_grade_description)}</strong></div>`:''}
+              ${item.test_notes?`<div><span style="color:var(--muted)">Notes:</span> ${esc(item.test_notes)}</div>`:''}
+            </div>` :
+            `<div style="text-align:center;color:var(--muted);padding:12px;font-size:13px">No testing results yet — click ✏ to add.</div>`;
+
+          unitRows += `
+            <tr id="inv-row-${item.id}">
+              <td style="min-width:100px">
+                ${item.status==='sold'?`<span style="display:inline-block;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:4px;font-size:9px;font-weight:800;padding:1px 5px;letter-spacing:.04em;margin-bottom:3px">SOLD</span><br>`:''}
+                <div style="font-size:11px;font-weight:600">${esc(item.vendor)}</div>
+                <div style="color:var(--muted);font-size:10px">${esc(item.month)} ${item.year}</div>
+                ${item.lot_id?`<div class="mono" style="font-size:10px;color:var(--blue)">${esc(item.lot_id)}</div>`:''}
+                ${item.sku?`<div class="mono" style="font-size:10px;color:var(--muted)">${esc(item.sku)}</div>`:''}
+              </td>
+              <td style="min-width:120px">
+                <div class="mono" style="font-size:11px;font-weight:600">${esc(item.serial_number||'—')}</div>
+                ${item.imei?`<div class="mono" style="font-size:10px;color:var(--muted)">IMEI: ${esc(item.imei)}</div>`:''}
+              </td>
+              <td style="min-width:110px;font-size:11px">
+                ${item.color?`<div style="font-weight:500">${esc(item.color)}</div>`:''}
+                <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px">
+                  ${item.storage?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.storage)}</span>`:''}
+                  ${item.ram?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.ram)}</span>`:''}
+                  ${item.wifi_cellular?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.wifi_cellular)}</span>`:''}
+                </div>
+              </td>
+              <td style="min-width:90px">
+                ${lockMap(item.lock_status)}
+                ${item.carrier&&item.carrier!==item.lock_status?`<div style="font-size:10px;color:var(--muted)">${esc(item.carrier)}</div>`:''}
+                ${item.mdm_lock==='On'?`<span class="badge badge-fail" style="font-size:9px;margin-top:2px;display:inline-block">MDM ON</span>`:''}
+              </td>
+              <td style="text-align:center;min-width:70px">
+                ${cosGrade
+                  ? `<span style="display:inline-flex;align-items:center;justify-content:center;min-width:36px;padding:0 6px;height:30px;border-radius:7px;background:${cosColor}18;color:${cosColor};border:2px solid ${cosColor};font-size:12px;font-weight:800;white-space:nowrap">${cosGrade}</span>`
+                  : `<span style="color:#cbd5e1;font-size:16px;font-weight:700">—</span>`}
+              </td>
+              <td style="min-width:110px">
+                ${item.tested_grade
+                  ? `<span class="badge badge-${finalGradeMap[item.tested_grade]||'na'}" style="font-size:10px">${item.tested_grade}</span>`
+                  : (hasTesting?`<span class="badge badge-na" style="font-size:10px">—</span>`:`<span class="badge badge-not-tested" style="font-size:10px">Untested</span>`)}
+                ${item.test_date?`<div style="font-size:10px;color:var(--muted);margin-top:2px">${fmtDate(item.test_date)}</div>`:''}
+              </td>
+              <td>
+                <div style="display:flex;gap:3px;align-items:center">
+                  <button id="inv-exp-${item.id}" class="btn btn-outline btn-sm btn-icon" onclick="toggleInvDetail(${item.id})" title="Test details" style="font-size:10px;padding:3px 6px">▶</button>
+                  <button class="btn btn-outline btn-sm btn-icon" title="Print Label" onclick="showInventoryLabel(${item.id})" style="color:var(--purple);border-color:var(--purple)">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                  </button>
+                  <button class="btn btn-primary btn-sm btn-icon" title="Test/Update" onclick="openInventoryTesting(${item.id})">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  </button>
+                  ${S.user.role==='admin'?`<button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="deleteInventory(${item.id})"><svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`:''}
+                </div>
+              </td>
+            </tr>
+            <tr id="inv-det-${item.id}" style="display:none">
+              <td colspan="7" style="padding:0">
+                <div class="inv-det-panel">
+                  <div style="font-size:11px;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">
+                    Test Results · S/N: ${esc(item.serial_number||'—')}
+                    ${item.testing_owner||item.tested_by?`<span style="font-weight:400;color:var(--muted);margin-left:8px">by ${esc(item.testing_owner||item.tested_by)}</span>`:''}
+                    ${item.d_grade_description?`<span style="color:var(--red);margin-left:8px">⚠ ${esc(item.d_grade_description)}</span>`:''}
+                  </div>
+                  ${detailHtml}
+                </div>
+              </td>
+            </tr>`;
+        });
+
+        cardsHtml += `
+        <div class="inv-model-card" id="inv-card-${gid}">
+          <div class="inv-card-header" onclick="toggleInvCard('${gid}')">
+            <span class="chip ${deviceTypeClass(group.type)}" style="font-size:11px;padding:2px 8px;flex-shrink:0">${typeIcon(group.type)} ${esc(group.type)}</span>
+            <span class="inv-card-model">${esc(group.model)}</span>
+            <span class="inv-card-count">${group.items.length} unit${group.items.length!==1?'s':''}</span>
+            <div class="inv-grade-bar-wrap">${gradeSummary(group.items)}</div>
+            <span id="inv-card-toggle-${gid}" class="inv-card-toggle">▶</span>
+          </div>
+          <div class="inv-card-body" id="inv-card-body-${gid}">
+            <table class="inv-unit-table">
+              <thead><tr>
+                <th>Vendor / Period</th><th>Serial / IMEI</th><th>Specs</th>
+                <th>Lock / MDM</th><th style="text-align:center">Overall Grade</th>
+                <th>Condition</th><th>Actions</th>
+              </tr></thead>
+              <tbody>${unitRows}</tbody>
+            </table>
+          </div>
+        </div>`;
+      });
+    }
+
+    // ── Type tab buttons ─────────────────────────────────────────────────────
+    const typeTabs = [`<button class="inv-tab ${S._iTypeTab==='all'?'active':''}" onclick="S._iTypeTab='all';loadInventory()">All <span class="tab-count">${typeCounts.all}</span></button>`]
+      .concat(presentTypes.map(t =>
+        `<button class="inv-tab ${S._iTypeTab===t?'active':''}" onclick="S._iTypeTab='${t}';loadInventory()">${typeTabIcons[t]||'📦'} ${t} <span class="tab-count">${typeCounts[t]}</span></button>`
+      )).join('');
 
     el.innerHTML = `
-      <div class="screen-header"><h2>Inventory</h2><p>${d.total} items · click ▶ to expand test details</p></div>
-      <div class="toolbar">
+      <div class="screen-header"><h2>Inventory</h2><p>${d.total} total units · ${Object.keys(groupMap).length} model${Object.keys(groupMap).length!==1?'s':''} · click a card to expand</p></div>
+      <div class="inv-type-tabs">${typeTabs}</div>
+      <div class="toolbar" style="margin-top:0">
         <div class="toolbar-left">
-          <input class="search-input" type="text" placeholder="Search S/N, model, description…" value="${esc(S.iFilters.search)}" oninput="S.iFilters.search=this.value" onkeydown="if(event.key==='Enter')loadInventory()">
-          <input type="text" placeholder="Lot ID" value="${esc(S.iFilters.lot_id)}" oninput="S.iFilters.lot_id=this.value" onkeydown="if(event.key==='Enter')loadInventory()" style="width:110px">
+          <input class="search-input" type="text" placeholder="Search S/N, model…" value="${esc(S.iFilters.search)}" oninput="S.iFilters.search=this.value" onkeydown="if(event.key==='Enter')loadInventory()">
+          <input type="text" placeholder="Lot ID" value="${esc(S.iFilters.lot_id)}" oninput="S.iFilters.lot_id=this.value" onkeydown="if(event.key==='Enter')loadInventory()" style="width:100px">
           <select onchange="S.iFilters.month=this.value;loadInventory()">
             <option value="">All Months</option>${monthOpts}
           </select>
@@ -1064,46 +1242,72 @@ async function loadInventory() {
           <select onchange="S.iFilters.vendor=this.value;loadInventory()">
             <option value="">All Vendors</option>${vendorOpts}
           </select>
-          <select onchange="S.iFilters.device_type=this.value;loadInventory()">
-            <option value="">All Types</option>${typeOpts}
-          </select>
-          <button class="btn btn-outline btn-sm" onclick="S.iFilters={month:'',year:'',vendor:'',device_type:'',lot_id:'',search:''};loadInventory()">Clear</button>
+          <button class="btn btn-outline btn-sm" onclick="S.iFilters={month:'',year:'',vendor:'',device_type:'',lot_id:'',search:''};S._iTypeTab='all';loadInventory()">Clear</button>
         </div>
         <div class="toolbar-right">
+          <button class="btn btn-outline btn-sm" onclick="toggleAllInvCards(true)">Expand All</button>
+          <button class="btn btn-outline btn-sm" onclick="toggleAllInvCards(false)">Collapse All</button>
           <button class="btn btn-success" onclick="doExportInventory()">
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Export Excel
+            Export
           </button>
-          <button class="btn btn-outline" onclick="showAddInventory()">+ Add Item</button>
+          <button class="btn btn-outline" onclick="showAddInventory()">+ Add</button>
           <button class="btn btn-primary" onclick="showImportInventory()">
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            Import Excel
+            Import
           </button>
         </div>
       </div>
-      <div class="table-wrap">
-        <table class="table-compact">
-          <thead><tr>
-            <th>Vendor / Period</th><th>Type</th><th>Model / SKU</th>
-            <th>Serial / IMEI</th><th>Specs</th><th>Lock / MDM</th>
-            <th>Grade</th><th>Actions</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-        <div class="table-foot"><span>Showing ${d.items.length} of ${d.total}</span></div>
-      </div>`;
+      <div class="inv-model-cards">${cardsHtml}</div>
+      <div style="padding:10px 0;color:var(--muted);font-size:12px">Showing ${displayItems.length} of ${d.total} items</div>`;
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }
 }
 
+// Toggle a single model accordion card
+function toggleInvCard(gid) {
+  const body = document.getElementById('inv-card-body-' + gid);
+  const tog  = document.getElementById('inv-card-toggle-' + gid);
+  if (!body) return;
+  const open = body.classList.contains('open');
+  if (open) {
+    body.classList.remove('open');
+    if (tog) tog.textContent = '▶';
+    // Close any open test-detail panels inside
+    body.querySelectorAll('[id^="inv-det-"]').forEach(r => { r.style.display = 'none'; });
+    body.querySelectorAll('[id^="inv-exp-"]').forEach(b => { b.textContent = '▶'; });
+  } else {
+    body.classList.add('open');
+    if (tog) tog.textContent = '▼';
+  }
+}
+
+// Expand or collapse ALL model cards at once
+function toggleAllInvCards(expand) {
+  document.querySelectorAll('[id^="inv-card-body-"]').forEach(body => {
+    const gid = body.id.replace('inv-card-body-', '');
+    const tog = document.getElementById('inv-card-toggle-' + gid);
+    if (expand) {
+      body.classList.add('open');
+      if (tog) tog.textContent = '▼';
+    } else {
+      body.classList.remove('open');
+      if (tog) tog.textContent = '▶';
+      body.querySelectorAll('[id^="inv-det-"]').forEach(r => { r.style.display = 'none'; });
+      body.querySelectorAll('[id^="inv-exp-"]').forEach(b => { b.textContent = '▶'; });
+    }
+  });
+}
+
+// Toggle test-detail panel for a single unit row inside a card
 function toggleInvDetail(id) {
   const det = document.getElementById('inv-det-' + id);
   const btn = document.getElementById('inv-exp-' + id);
   if (!det) return;
   const open = det.style.display !== 'none';
   det.style.display = open ? 'none' : '';
-  btn.textContent = open ? '▶' : '▼';
+  if (btn) btn.textContent = open ? '▶' : '▼';
 }
 
 async function doExportInventory() {
@@ -1313,7 +1517,7 @@ function showInventoryLabel(itemId) {
 
   const barcodeVal = item.serial_number || item.imei || item.sku || `INV-${item.id}`;
   const grade = item.overall_grade || item.tested_grade || item.grade || item.condition_grade || '—';
-  const gradeColor = { A:'#16a34a', B:'#2563eb', C:'#d97706', D:'#dc2626', Working:'#16a34a', 'Not Working':'#dc2626', New:'#0891b2' }[grade] || '#64748b';
+  const gradeColor = { 'A+':'#15803d', A:'#16a34a', 'B+':'#0ea5e9', B:'#2563eb', C:'#d97706', 'D-Fixable':'#ea580c', 'D-Parts':'#dc2626', 'S-Scrap':'#7f1d1d' }[grade] || '#64748b';
 
   const closeX = `<button class="modal-close" onclick="closeModal()"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
   openModal(`
@@ -1426,7 +1630,7 @@ function updateLabelSize(itemId) {
   const size = document.getElementById('label-size-sel')?.value || 'medium';
   const barcodeVal = item.serial_number || item.imei || item.sku || `INV-${item.id}`;
   const grade = item.overall_grade || item.tested_grade || item.grade || item.condition_grade || '—';
-  const gradeColor = { A:'#16a34a', B:'#2563eb', C:'#d97706', D:'#dc2626', Working:'#16a34a', 'Not Working':'#dc2626', New:'#0891b2' }[grade] || '#64748b';
+  const gradeColor = { 'A+':'#15803d', A:'#16a34a', 'B+':'#0ea5e9', B:'#2563eb', C:'#d97706', 'D-Fixable':'#ea580c', 'D-Parts':'#dc2626', 'S-Scrap':'#7f1d1d' }[grade] || '#64748b';
   const preview = document.getElementById('modal-label-preview');
   if (preview) {
     preview.innerHTML = buildLabelHTML(item, barcodeVal, grade, gradeColor, size);
@@ -1441,7 +1645,7 @@ function printInventoryLabel(itemId) {
   const size = document.getElementById('label-size-sel')?.value || 'medium';
   const barcodeVal = item.serial_number || item.imei || item.sku || `INV-${item.id}`;
   const grade = item.overall_grade || item.tested_grade || item.grade || item.condition_grade || '—';
-  const gradeColor = { A:'#16a34a', B:'#2563eb', C:'#d97706', D:'#dc2626', Working:'#16a34a', 'Not Working':'#dc2626', New:'#0891b2' }[grade] || '#64748b';
+  const gradeColor = { 'A+':'#15803d', A:'#16a34a', 'B+':'#0ea5e9', B:'#2563eb', C:'#d97706', 'D-Fixable':'#ea580c', 'D-Parts':'#dc2626', 'S-Scrap':'#7f1d1d' }[grade] || '#64748b';
 
   const labelHtml = Array.from({length: copies}, () => buildLabelHTML(item, barcodeVal, grade, gradeColor, size)).join('<div style="height:8px"></div>');
   const printArea = document.getElementById('label-print-area');
@@ -1513,16 +1717,18 @@ async function openInventoryTesting(itemId) {
           </div>
           <div class="form-group">
             <label>Overall Grade</label>
-            <select id="t-overall_grade">
+            <input type="hidden" id="t-current-sku" value="${esc(item.sku||'')}">
+            <select id="t-overall_grade" onchange="previewSkuGrade()">
               <option value="">— Select —</option>
-              ${['Working','Not Working','Partial Working','For Parts','Scrap'].map(g=>`<option ${(existing?.overall_grade||'')===g?'selected':''}>${g}</option>`).join('')}
+              ${['A+','A','B+','B','C','D-Fixable','D-Parts','S-Scrap'].map(g=>`<option ${(existing?.overall_grade||'')===g?'selected':''}>${g}</option>`).join('')}
             </select>
+            <div id="sku-grade-preview" style="margin-top:5px;font-size:11px;min-height:16px"></div>
           </div>
           <div class="form-group">
             <label>Final Cosmetic Grade</label>
             <select id="t-final_grade">
               <option value="">— Select —</option>
-              ${['A','B','C','D','New','Scrap'].map(g=>`<option ${(existing?.final_grade||'')===g?'selected':''}>${g}</option>`).join('')}
+              ${['Working','Partial Working','Not Working','On Hold','Parts','Scrap'].map(g=>`<option ${(existing?.final_grade||'')===g?'selected':''}>${g}</option>`).join('')}
             </select>
           </div>
         </div>
@@ -1578,6 +1784,8 @@ async function openInventoryTesting(itemId) {
     </div>`);
 
   buildTestFields('test-fields-container', deviceType, existing, 'inventory');
+  // Show preview for any pre-selected grade
+  setTimeout(previewSkuGrade, 0);
 }
 
 async function saveInventoryTesting(itemId) {
@@ -1598,12 +1806,21 @@ async function saveInventoryTesting(itemId) {
   const bc = gv('t-battery_cycles'); if (bc) payload.battery_cycles = parseInt(bc);
   fields.forEach(f => { payload[f.key] = gv('t-' + f.key) || 'Not Tested'; });
 
-  // Also update inventory item fields: serial, imei, lock_status, carrier
+  // Also update inventory item fields: serial, imei, lock_status, carrier, and SKU grade
   const invUpdate = {};
   const sn = gv('t-serial_number'); if (sn !== undefined) invUpdate.serial_number = sn;
   const im = gv('t-imei'); if (im !== undefined) invUpdate.imei = im;
   const lockStatus = gv('t-lock_status'); if (lockStatus !== undefined) invUpdate.lock_status = lockStatus;
   const carrier = gv('t-locked_carrier'); if (carrier !== undefined) invUpdate.carrier = carrier;
+
+  // Auto-update SKU grade segment when technician selects Overall Grade
+  const newGrade = gv('t-overall_grade');
+  const currentSku = gv('t-current-sku');
+  if (newGrade && currentSku) {
+    const updatedSku = updateSkuGrade(currentSku, newGrade);
+    if (updatedSku !== currentSku) invUpdate.sku = updatedSku;
+  }
+
   if (Object.keys(invUpdate).length) {
     await api('PUT', `/api/inventory/${itemId}`, invUpdate).catch(() => {});
   }
@@ -2031,16 +2248,32 @@ function linkPOToInventory(lotId, vendorName) {
 }
 
 // ─── PO Header CRUD ───────────────────────────────────────────────────────────
+async function refreshLotId() {
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const monthName = document.getElementById('po-purchase_month')?.value;
+  const year = document.getElementById('po-purchase_year')?.value;
+  if (!monthName || !year) return;
+  const monthNum = String(months.indexOf(monthName) + 1).padStart(2, '0');
+  try {
+    const data = await api('GET', `/api/purchase-orders/next-lot-id?year=${year}&month=${monthNum}`);
+    const el = document.getElementById('po-lot_id');
+    if (el) el.value = data.lot_id;
+  } catch(e) { /* silently ignore */ }
+}
+
 function poHeaderModalBody(po) {
   const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   const curMonth = months[new Date().getMonth()];
   const deviceTypes = ['iPhone','Smartphone','iPad','MacBook','Laptop','Gaming Console','Smartwatch','Other'];
   const existingTypes = (po?.device_types||'').split(',').map(t=>t.trim()).filter(Boolean);
+  const isNew = !po;
+  const monthOnChange = isNew ? ' onchange="refreshLotId()"' : '';
+  const yearOnChange = isNew ? ' onchange="refreshLotId()"' : '';
   return `
     <div class="form-section">
       <div class="form-section-title">PO Identification</div>
       <div class="form-grid form-grid-2">
-        <div class="form-group"><label>Lot ID</label><input type="text" id="po-lot_id" value="${esc(po?.lot_id||'')}" placeholder="e.g. LOT-2024-001"></div>
+        <div class="form-group"><label>Lot ID</label><input type="text" id="po-lot_id" value="${esc(po?.lot_id||'')}" placeholder="Auto-generated"></div>
         <div class="form-group"><label>Invoice No.</label><input type="text" id="po-invoice_no" value="${esc(po?.invoice_no||'')}" placeholder="Invoice number"></div>
       </div>
       <div class="form-group"><label>Vendor Name *</label><input type="text" id="po-vendor_name" value="${esc(po?.vendor_name||'')}" placeholder="Vendor / Supplier name"></div>
@@ -2049,10 +2282,10 @@ function poHeaderModalBody(po) {
       <div class="form-section-title">Purchase Details</div>
       <div class="form-grid form-grid-2">
         <div class="form-group"><label>Purchase Month</label>
-          <select id="po-purchase_month">${months.map(m=>`<option ${(po?.purchase_month||curMonth)===m?'selected':''}>${m}</option>`).join('')}</select>
+          <select id="po-purchase_month"${monthOnChange}>${months.map(m=>`<option ${(po?.purchase_month||curMonth)===m?'selected':''}>${m}</option>`).join('')}</select>
         </div>
         <div class="form-group"><label>Purchase Year</label>
-          <input type="number" id="po-purchase_year" value="${po?.purchase_year||new Date().getFullYear()}" min="2020" max="2030">
+          <input type="number" id="po-purchase_year" value="${po?.purchase_year||new Date().getFullYear()}" min="2020" max="2030"${yearOnChange}>
         </div>
       </div>
       <div class="form-group">
@@ -2079,7 +2312,7 @@ function poHeaderPayload() {
   };
 }
 
-function showAddPO() {
+async function showAddPO() {
   const closeX = `<button class="modal-close" onclick="closeModal()"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
   openModal(`
     <div class="modal-header"><h3>New Purchase Order</h3>${closeX}</div>
@@ -2088,6 +2321,7 @@ function showAddPO() {
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="doAddPO()">Create PO</button>
     </div>`);
+  await refreshLotId();
 }
 
 async function doAddPO() {

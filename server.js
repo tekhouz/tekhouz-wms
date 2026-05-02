@@ -197,6 +197,9 @@ try { db.exec("ALTER TABLE inventory_testing ADD COLUMN d_grade_description TEXT
 try { db.exec("ALTER TABLE inventory_testing ADD COLUMN overall_grade TEXT"); } catch {}
 try { db.exec("ALTER TABLE po_items ADD COLUMN receive_status TEXT DEFAULT 'Pending'"); } catch {}
 try { db.exec("ALTER TABLE po_items ADD COLUMN inventory_id INTEGER"); } catch {}
+try { db.exec("ALTER TABLE inventory ADD COLUMN status TEXT DEFAULT 'available'"); } catch {}
+try { db.exec("ALTER TABLE inventory ADD COLUMN sold_order_id INTEGER"); } catch {}
+try { db.exec("ALTER TABLE inventory ADD COLUMN sold_at DATETIME"); } catch {}
 
 // Seed default admin
 const adminExists = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
@@ -204,7 +207,7 @@ if (!adminExists) {
   db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(
     'admin', bcrypt.hashSync('admin123', 10), 'admin'
   );
-  console.log('Default admin created: admin / admin123');
+  console.log('Default admin account created.');
 }
 
 // ─── Auth middleware ─────────────────────────────────────────────────────────
@@ -286,8 +289,8 @@ app.get('/api/dashboard', auth, (req, res) => {
   const working = r("SELECT COUNT(*) c FROM inventory_testing WHERE overall_grade = 'Working'").c;
   const testRate = invTested > 0 ? Math.round(working / invTested * 100) : 0;
 
-  // Grade distribution
-  const grades = a(`SELECT COALESCE(final_grade,'Unknown') grade, COUNT(*) count FROM inventory_testing GROUP BY final_grade ORDER BY count DESC`);
+  // Grade distribution — overall_grade stores A+/A/B+/B/C/D-Fixable/D-Parts/S-Scrap
+  const grades = a(`SELECT COALESCE(overall_grade,'Unknown') grade, COUNT(*) count FROM inventory_testing WHERE overall_grade IS NOT NULL AND overall_grade != '' GROUP BY overall_grade ORDER BY CASE overall_grade WHEN 'A+' THEN 1 WHEN 'A' THEN 2 WHEN 'B+' THEN 3 WHEN 'B' THEN 4 WHEN 'C' THEN 5 WHEN 'D-Fixable' THEN 6 WHEN 'D-Parts' THEN 7 WHEN 'S-Scrap' THEN 8 ELSE 9 END`);
 
   // Overall grade breakdown
   const overallGrades = a(`SELECT COALESCE(overall_grade,'Unknown') grade, COUNT(*) count FROM inventory_testing GROUP BY overall_grade ORDER BY count DESC`);
@@ -499,22 +502,80 @@ app.get('/api/inventory/scan', auth, (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ error: 'No scan value' });
   const val = q.trim();
-  // Match by serial_number, imei, sku, or INV-{id}
-  let item = db.prepare(`SELECT i.*, t.final_grade tested_grade, t.overall_grade, t.mdm_lock, t.battery_health
-    FROM inventory i LEFT JOIN inventory_testing t ON i.id = t.inventory_id
-    WHERE i.serial_number = ? OR i.imei = ? LIMIT 1`).get(val, val);
+  const scanQ = `SELECT i.*, t.final_grade tested_grade, t.overall_grade, t.mdm_lock, t.battery_health,
+    o.order_id sold_to_order_ref, o.import_date sold_date
+    FROM inventory i
+    LEFT JOIN inventory_testing t ON i.id = t.inventory_id
+    LEFT JOIN daily_orders o ON i.sold_order_id = o.id`;
+  let item = db.prepare(`${scanQ} WHERE i.serial_number = ? OR i.imei = ? LIMIT 1`).get(val, val);
   if (!item && val.toUpperCase().startsWith('INV-')) {
     const id = parseInt(val.split('-')[1]);
-    item = db.prepare(`SELECT i.*, t.final_grade tested_grade, t.overall_grade, t.mdm_lock
-      FROM inventory i LEFT JOIN inventory_testing t ON i.id = t.inventory_id WHERE i.id = ?`).get(id);
+    item = db.prepare(`${scanQ} WHERE i.id = ?`).get(id);
   }
   if (!item) {
-    item = db.prepare(`SELECT i.*, t.final_grade tested_grade, t.overall_grade, t.mdm_lock
-      FROM inventory i LEFT JOIN inventory_testing t ON i.id = t.inventory_id
-      WHERE i.sku = ? LIMIT 1`).get(val);
+    item = db.prepare(`${scanQ} WHERE i.sku = ? LIMIT 1`).get(val);
   }
   if (!item) return res.status(404).json({ error: `No inventory item found for: ${val}` });
   res.json(item);
+});
+
+// ─── Assign serial to order (with duplicate + sold checks) ───────────────────
+app.post('/api/orders/:id/assign-serial', auth, (req, res) => {
+  try {
+    const orderId = parseInt(req.params.id);
+    const { serial } = req.body;
+    if (!serial) return res.status(400).json({ error: 'Serial number is required' });
+
+    // 1. Check if this serial is already assigned to any OTHER order
+    const duplicate = db.prepare(
+      `SELECT id, order_id FROM daily_orders WHERE serial_no = ? AND id != ?`
+    ).get(serial, orderId);
+    if (duplicate) {
+      return res.status(409).json({
+        error: `Serial ${serial} is already assigned to order #${duplicate.order_id}`,
+        conflict_order: duplicate.order_id
+      });
+    }
+
+    // 2. Check inventory sold status (columns may not exist on old DBs — handle gracefully)
+    let invItem = null;
+    try {
+      invItem = db.prepare(
+        `SELECT id, status, sold_order_id FROM inventory WHERE serial_number = ? OR imei = ? LIMIT 1`
+      ).get(serial, serial);
+    } catch { /* status column may not exist yet — skip sold check */ }
+
+    if (invItem && invItem.status === 'sold' && invItem.sold_order_id && invItem.sold_order_id !== orderId) {
+      let soldOrderRef = invItem.sold_order_id;
+      try {
+        const soldTo = db.prepare('SELECT order_id FROM daily_orders WHERE id = ?').get(invItem.sold_order_id);
+        if (soldTo) soldOrderRef = soldTo.order_id;
+      } catch {}
+      return res.status(409).json({
+        error: `This device is already sold (Order #${soldOrderRef})`,
+        conflict_order: soldOrderRef
+      });
+    }
+
+    // 3. Assign serial to the order
+    db.prepare('UPDATE daily_orders SET serial_no = ? WHERE id = ?').run(serial, orderId);
+
+    // 4. Mark inventory item as sold (best-effort — may fail if columns not migrated yet)
+    let inventoryUpdated = false;
+    if (invItem) {
+      try {
+        db.prepare(
+          `UPDATE inventory SET status = 'sold', sold_order_id = ?, sold_at = CURRENT_TIMESTAMP WHERE id = ?`
+        ).run(orderId, invItem.id);
+        inventoryUpdated = true;
+      } catch {}
+    }
+
+    res.json({ success: true, inventory_updated: inventoryUpdated });
+  } catch (err) {
+    console.error('assign-serial error:', err.message);
+    res.status(500).json({ error: err.message || 'Failed to assign serial' });
+  }
 });
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
@@ -783,6 +844,20 @@ app.delete('/api/purchase-orders/:id', auth, adminOnly, (req, res) => {
   res.json({ success: true });
 });
 
+app.get('/api/purchase-orders/next-lot-id', auth, (req, res) => {
+  const { year, month } = req.query;
+  if (!year || !month) return res.status(400).json({ error: 'year and month required' });
+  const prefix = `Lot-${year}-${month}-`;
+  const existing = db.prepare(`SELECT lot_id FROM purchase_orders WHERE lot_id LIKE ?`).all(prefix + '%');
+  let maxNum = 0;
+  existing.forEach(po => {
+    const num = parseInt((po.lot_id || '').slice(prefix.length));
+    if (!isNaN(num) && num > maxNum) maxNum = num;
+  });
+  const next = String(maxNum + 1).padStart(3, '0');
+  res.json({ lot_id: `${prefix}${next}` });
+});
+
 app.get('/api/purchase-orders/:id/items', auth, (req, res) => {
   const { search, brand, device_type } = req.query;
   let q = 'SELECT * FROM po_items WHERE po_id = ?';
@@ -932,4 +1007,4 @@ app.post('/api/purchase-orders/:id/import-items', auth, upload.single('file'), (
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`\nTekhouz Warehouse Management running at http://localhost:${PORT}\nLogin: admin / admin123\n`));
+app.listen(PORT, () => console.log(`Tekhouz Warehouse Management running on port ${PORT}`));
