@@ -26,6 +26,21 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ─── MySQL Connection Pool ────────────────────────────────────────────────────
 function buildPoolConfig() {
+  const MYSQL_URL = process.env.MYSQL_URL;
+  if (MYSQL_URL) {
+    const url = new URL(MYSQL_URL);
+    return {
+      host: url.hostname,
+      port: parseInt(url.port) || 3306,
+      user: url.username,
+      password: url.password,
+      database: url.pathname.replace(/^\//, ''),
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    };
+  }
   const DATABASE_URL = process.env.DATABASE_URL;
   if (DATABASE_URL) {
     const url = new URL(DATABASE_URL);
