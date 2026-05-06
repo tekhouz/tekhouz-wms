@@ -201,6 +201,28 @@ try { db.exec("ALTER TABLE inventory ADD COLUMN status TEXT DEFAULT 'available'"
 try { db.exec("ALTER TABLE inventory ADD COLUMN sold_order_id INTEGER"); } catch {}
 try { db.exec("ALTER TABLE inventory ADD COLUMN sold_at DATETIME"); } catch {}
 try { db.exec("ALTER TABLE daily_orders ADD COLUMN shipping_paid REAL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE daily_orders ADD COLUMN device_type TEXT DEFAULT 'Other'"); } catch {}
+
+// Backfill device_type for existing rows using item_name / item_sku
+function inferDeviceType(name, sku) {
+  const s = ((name||'') + ' ' + (sku||'')).toLowerCase();
+  if (/iphone|iphone/.test(s)) return 'iPhone';
+  if (/ipad/.test(s)) return 'iPad';
+  if (/macbook|mac book/.test(s)) return 'MacBook';
+  if (/galaxy|samsung/.test(s)) return 'Samsung';
+  if (/laptop/.test(s)) return 'Laptop';
+  if (/tablet/.test(s)) return 'Tablet';
+  if (/watch/.test(s)) return 'Smartwatch';
+  if (/playstation|xbox|nintendo|gaming console/.test(s)) return 'Gaming Console';
+  if (/smartphone|android/.test(s)) return 'Smartphone';
+  return 'Other';
+}
+// Backfill any rows that still have the default 'Other' and have item_name/sku to parse
+try {
+  const untyped = db.prepare("SELECT id, item_name, item_sku FROM daily_orders WHERE device_type IS NULL OR device_type = 'Other'").all();
+  const upd = db.prepare("UPDATE daily_orders SET device_type = ? WHERE id = ?");
+  db.transaction(() => { untyped.forEach(r => upd.run(inferDeviceType(r.item_name, r.item_sku), r.id)); })();
+} catch {}
 
 // Seed default admin
 const adminExists = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
@@ -372,8 +394,8 @@ app.post('/api/orders/import', auth, upload.single('file'), (req, res) => {
   const importDate = req.body.ship_date || new Date().toISOString().split('T')[0];
 
   const stmt = db.prepare(`INSERT INTO daily_orders
-    (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, device_type)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
   function parseXlDate(raw) {
     if (!raw) return '';
@@ -400,7 +422,8 @@ app.post('/api/orders/import', auth, upload.single('file'), (req, res) => {
         g(row,'Item Name','item_name','Description'),
         g(row,'Recipient','recipient'),
         parseInt(row['Qty'] || row['qty'] || 1) || 1,
-        gNum(row,'Price','price')
+        gNum(row,'Price','price'),
+        inferDeviceType(g(row,'Item Name','item_name','Description'), g(row,'Item SKU','item_sku','SKU'))
       );
       count++;
     }
@@ -457,8 +480,8 @@ app.post('/api/orders/shipstation', auth, async (req, res) => {
     const orders = data.orders || [];
 
     const stmt = db.prepare(`INSERT INTO daily_orders
-      (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, shipping_paid)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, shipping_paid, device_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
     let count = 0;
     db.transaction(() => {
@@ -469,7 +492,8 @@ app.post('/api/orders/shipstation', auth, async (req, res) => {
         for (const item of o.items || []) {
           stmt.run(importDate, store, '', String(o.orderNumber || o.orderId),
             oDate, item.sku || '', item.name || '',
-            o.shipTo?.name || '', item.quantity || 1, item.unitPrice || 0, shippingPaid);
+            o.shipTo?.name || '', item.quantity || 1, item.unitPrice || 0, shippingPaid,
+            inferDeviceType(item.name, item.sku));
           count++;
         }
       }

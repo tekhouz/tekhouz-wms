@@ -421,6 +421,7 @@ async function loadOrders() {
     if (!S._oTypeTab) S._oTypeTab = 'all';
     const typeIcons = { iPhone:'📱', iPad:'📱', MacBook:'💻', Samsung:'📱', Laptop:'💻', Tablet:'📱', Smartphone:'📱', 'Gaming Console':'🎮', Smartwatch:'⌚', Other:'📦' };
     const typeCounts = { all: d.orders.length };
+    // Use o.device_type from daily_orders (set at import time from item name/SKU) — always populated
     d.orders.forEach(o => { const t = o.device_type || 'Other'; typeCounts[t] = (typeCounts[t]||0)+1; });
     const typeOrder = ['iPhone','iPad','MacBook','Samsung','Laptop','Tablet','Smartphone','Gaming Console','Smartwatch','Other'];
     const presentTypes = typeOrder.filter(t => typeCounts[t]);
@@ -429,6 +430,7 @@ async function loadOrders() {
         `<button class="inv-tab ${S._oTypeTab===t?'active':''}" onclick="S._oTypeTab='${t}';loadOrders()">${typeIcons[t]||'📦'} ${t} <span class="tab-count">${typeCounts[t]}</span></button>`
       )).join('');
 
+    // Filter by device_type stored on the order row itself (not from order_testing)
     const filteredOrders = S._oTypeTab === 'all' ? d.orders : d.orders.filter(o => (o.device_type||'Other') === S._oTypeTab);
 
     const dateOpts = d.dates.map(x => `<option value="${x}" ${S.oFilters.date===x?'selected':''}>${x}</option>`).join('');
