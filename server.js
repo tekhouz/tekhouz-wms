@@ -73,17 +73,17 @@ const pool = mysql.createPool(buildPoolConfig());
 
 // ─── DB Helpers ───────────────────────────────────────────────────────────────
 async function dbGet(sql, params = []) {
-  const [rows] = await pool.execute(sql, params);
+  const [rows] = await pool.query(sql, params);
   return rows[0] || null;
 }
 
 async function dbAll(sql, params = []) {
-  const [rows] = await pool.execute(sql, params);
+  const [rows] = await pool.query(sql, params);
   return rows;
 }
 
 async function dbRun(sql, params = []) {
-  const [result] = await pool.execute(sql, params);
+  const [result] = await pool.query(sql, params);
   return { insertId: result.insertId, affectedRows: result.affectedRows };
 }
 
@@ -135,7 +135,7 @@ function gNum(row, ...keys) {
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 async function initDB() {
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id INT AUTO_INCREMENT PRIMARY KEY,
       username VARCHAR(255) UNIQUE NOT NULL,
@@ -145,7 +145,7 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS daily_orders (
       id INT AUTO_INCREMENT PRIMARY KEY,
       import_date VARCHAR(20),
@@ -164,7 +164,7 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS order_testing (
       id INT AUTO_INCREMENT PRIMARY KEY,
       order_row_id INT,
@@ -199,7 +199,7 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS inventory (
       id INT AUTO_INCREMENT PRIMARY KEY,
       month VARCHAR(20) NOT NULL,
@@ -240,14 +240,14 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS \`settings\` (
       \`key\` VARCHAR(255) PRIMARY KEY,
       value TEXT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS inventory_testing (
       id INT AUTO_INCREMENT PRIMARY KEY,
       inventory_id INT,
@@ -284,7 +284,7 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS purchase_orders (
       id INT AUTO_INCREMENT PRIMARY KEY,
       lot_id VARCHAR(255),
@@ -299,7 +299,7 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  await pool.execute(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS po_items (
       id INT AUTO_INCREMENT PRIMARY KEY,
       po_id INT,
@@ -331,7 +331,7 @@ async function initDB() {
     if (untyped.length > 0) {
       await dbTx(async (conn) => {
         for (const r of untyped) {
-          await conn.execute('UPDATE daily_orders SET device_type = ? WHERE id = ?', [inferDeviceType(r.item_name, r.item_sku), r.id]);
+          await conn.query('UPDATE daily_orders SET device_type = ? WHERE id = ?', [inferDeviceType(r.item_name, r.item_sku), r.id]);
         }
       });
     }
@@ -570,7 +570,7 @@ app.post('/api/orders/import', auth, upload.single('file'), async (req, res) => 
     await dbTx(async (conn) => {
       for (const row of rows) {
         const od = parseXlDate(row['Order Date']);
-        await conn.execute(
+        await conn.query(
           `INSERT INTO daily_orders
             (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, device_type)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -673,7 +673,7 @@ app.post('/api/orders/shipstation', auth, async (req, res) => {
         const store = o.advancedOptions?.storeName || 'ShipStation';
         const shippingPaid = o.shippingAmount || 0;
         for (const item of o.items || []) {
-          await conn.execute(
+          await conn.query(
             `INSERT INTO daily_orders
               (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, shipping_paid, device_type)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -971,7 +971,7 @@ app.post('/api/inventory/import', auth, upload.single('file'), async (req, res) 
             if (match) imei = match[1];
           }
 
-          await conn.execute(
+          await conn.query(
             `INSERT INTO inventory
               (month, year, vendor, device_type, po_number, vendor_item_id, manufacturer, part_number,
                description, serial_number, imei, condition_grade, missing_components, damages,
@@ -1268,7 +1268,7 @@ app.post('/api/po-items/:id/receive', auth, async (req, res) => {
           const u = units?.[i] || {};
           const sn = u.serial_number !== undefined ? u.serial_number : (qty === 1 ? item.serial_number||'' : '');
           const im = u.imei !== undefined ? u.imei : (qty === 1 ? item.imei||'' : '');
-          const [result] = await conn.execute(
+          const [result] = await conn.query(
             `INSERT INTO inventory
               (vendor, month, year, device_type, model, color, ram, storage, wifi_cellular,
                serial_number, imei, sku, description, lot_id, invoice_no, po_id, price, po_price)
@@ -1312,7 +1312,7 @@ app.post('/api/purchase-orders/:id/receive-all', auth, async (req, res) => {
         for (let i = 0; i < qty; i++) {
           const sn = (qty === 1 ? item.serial_number||'' : '');
           const im = (qty === 1 ? item.imei||'' : '');
-          const [result] = await conn.execute(
+          const [result] = await conn.query(
             `INSERT INTO inventory
               (vendor, month, year, device_type, model, color, ram, storage, wifi_cellular,
                serial_number, imei, sku, description, lot_id, invoice_no, po_id, price, po_price)
@@ -1328,7 +1328,7 @@ app.post('/api/purchase-orders/:id/receive-all', auth, async (req, res) => {
           if (i === 0) firstId = result.insertId;
           totalUnits++;
         }
-        await conn.execute("UPDATE po_items SET receive_status='Received', inventory_id=? WHERE id=?", [firstId, item.id]);
+        await conn.query("UPDATE po_items SET receive_status='Received', inventory_id=? WHERE id=?", [firstId, item.id]);
       }
     });
 
@@ -1377,7 +1377,7 @@ app.post('/api/purchase-orders/:id/import-items', auth, upload.single('file'), a
     let count = 0;
     await dbTx(async (conn) => {
       for (const row of rows) {
-        await conn.execute(
+        await conn.query(
           `INSERT INTO po_items (po_id,device_type,brand,model,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
