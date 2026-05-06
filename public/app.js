@@ -10,6 +10,7 @@ const S = {
   po: { pos: [], total: 0, filters: { search: '', vendor: '', month: '', year: '' }, currentPo: null, poItems: [], itemSearch: '' },
   catalog: null,
   oFilters: { date: '', source: '', search: '', delivery: '' },
+  _oTypeTab: 'all',
   iFilters: { month: '', year: '', vendor: '', device_type: '', lot_id: '', search: '' },
 };
 
@@ -416,10 +417,24 @@ async function loadOrders() {
     const d = await api('GET', '/api/orders?' + p);
     S.orders = d;
 
+    // ── Device type tabs (client-side) ────────────────────────────────────────
+    if (!S._oTypeTab) S._oTypeTab = 'all';
+    const typeIcons = { iPhone:'📱', iPad:'📱', MacBook:'💻', Samsung:'📱', Laptop:'💻', Tablet:'📱', Smartphone:'📱', 'Gaming Console':'🎮', Smartwatch:'⌚', Other:'📦' };
+    const typeCounts = { all: d.orders.length };
+    d.orders.forEach(o => { const t = o.device_type || 'Other'; typeCounts[t] = (typeCounts[t]||0)+1; });
+    const typeOrder = ['iPhone','iPad','MacBook','Samsung','Laptop','Tablet','Smartphone','Gaming Console','Smartwatch','Other'];
+    const presentTypes = typeOrder.filter(t => typeCounts[t]);
+    const typeTabs = [`<button class="inv-tab ${S._oTypeTab==='all'?'active':''}" onclick="S._oTypeTab='all';loadOrders()">All <span class="tab-count">${typeCounts.all}</span></button>`]
+      .concat(presentTypes.map(t =>
+        `<button class="inv-tab ${S._oTypeTab===t?'active':''}" onclick="S._oTypeTab='${t}';loadOrders()">${typeIcons[t]||'📦'} ${t} <span class="tab-count">${typeCounts[t]}</span></button>`
+      )).join('');
+
+    const filteredOrders = S._oTypeTab === 'all' ? d.orders : d.orders.filter(o => (o.device_type||'Other') === S._oTypeTab);
+
     const dateOpts = d.dates.map(x => `<option value="${x}" ${S.oFilters.date===x?'selected':''}>${x}</option>`).join('');
     const srcOpts = d.sources.map(x => `<option value="${x}" ${S.oFilters.source===x?'selected':''}>${esc(x)}</option>`).join('');
 
-    const rows = d.orders.map(o => {
+    const rows = filteredOrders.map(o => {
       const hasTesting = !!o.test_id;
       const overallStatusMap = {'Tested Working':'pass','Not Working':'fail','Partial Working':'ready','On Hold':'pending','Other':'na','Not Tested':'not-tested'};
       const overallBadge = o.overall_status && o.overall_status !== 'Not Tested'
@@ -465,7 +480,8 @@ async function loadOrders() {
 
     el.innerHTML = `
       <div class="screen-header"><h2>Daily Orders</h2><p>${d.total} total orders · click any Serial No. cell to enter/edit it</p></div>
-      <div class="toolbar">
+      <div class="inv-type-tabs">${typeTabs}</div>
+      <div class="toolbar" style="margin-top:0">
         <div class="toolbar-left">
           <input class="search-input" type="text" placeholder="Search serial, order ID, item, SKU…" value="${esc(S.oFilters.search)}" oninput="S.oFilters.search=this.value" onkeydown="if(event.key==='Enter')loadOrders()">
           <input type="date" title="Filter by Ship Date" value="${S.oFilters.date}" onchange="S.oFilters.date=this.value;loadOrders()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px;color:${S.oFilters.date?'var(--txt)':'var(--muted)'}">
@@ -481,7 +497,7 @@ async function loadOrders() {
             <option value="Returned" ${S.oFilters.delivery==='Returned'?'selected':''}>Returned</option>
             <option value="Cancelled" ${S.oFilters.delivery==='Cancelled'?'selected':''}>Cancelled</option>
           </select>
-          <button class="btn btn-outline btn-sm" onclick="S.oFilters={date:'',source:'',search:'',delivery:''};loadOrders()">Clear</button>
+          <button class="btn btn-outline btn-sm" onclick="S.oFilters={date:'',source:'',search:'',delivery:''};S._oTypeTab='all';loadOrders()">Clear</button>
         </div>
         <div class="toolbar-right">
           <button class="btn btn-outline" style="border-color:var(--purple);color:var(--purple)" onclick="openScanModal()">
@@ -503,7 +519,7 @@ async function loadOrders() {
           <thead><tr><th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th>Recipient</th><th>Ship Paid</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Notes</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
-        <div class="table-foot"><span>Showing ${d.orders.length} of ${d.total}</span></div>
+        <div class="table-foot"><span>Showing ${filteredOrders.length} of ${d.total}</span></div>
       </div>`;
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;

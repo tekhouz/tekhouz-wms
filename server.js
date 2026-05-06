@@ -338,7 +338,7 @@ app.get('/api/dashboard', auth, (req, res) => {
 app.get('/api/orders', auth, (req, res) => {
   const { date, source, search, delivery, page = 1, limit = 100 } = req.query;
   let q = `SELECT o.*, COALESCE(t.delivery_status,'Pending') delivery_status,
-           t.cosmetic_grade, t.overall_status, t.id test_id, t.tested_by, t.test_date, t.notes
+           t.cosmetic_grade, t.overall_status, t.id test_id, t.tested_by, t.test_date, t.notes, t.device_type
            FROM daily_orders o LEFT JOIN order_testing t ON o.id = t.order_row_id WHERE 1=1`;
   const p = [];
   if (date) { q += ' AND o.import_date = ?'; p.push(date); }
