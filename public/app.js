@@ -2705,6 +2705,26 @@ async function doImportPOItems(poId) {
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
+async function doBackupDownload() {
+  const btn = document.getElementById('backup-btn');
+  if (btn) { btn.textContent = 'Preparing…'; btn.disabled = true; }
+  try {
+    const resp = await fetch('/api/backup/download', { headers: { Authorization: 'Bearer ' + S.token } });
+    if (!resp.ok) { const e = await resp.json(); throw new Error(e.error); }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const date = new Date().toISOString().slice(0,10);
+    a.href = url; a.download = `Tekhouz-Backup-${date}.xlsx`; a.click();
+    URL.revokeObjectURL(url);
+    showToast('Backup downloaded successfully', 'success');
+  } catch(ex) {
+    showToast('Backup failed: ' + ex.message, 'error');
+  } finally {
+    if (btn) { btn.textContent = 'Download Full Backup (.xlsx)'; btn.disabled = false; }
+  }
+}
+
 async function renderSettings() {
   const el = document.getElementById('screen-settings');
   el.innerHTML = `<div class="screen-header"><h2>Settings</h2><p>Manage device catalog and application configuration</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
@@ -2744,6 +2764,19 @@ function renderSettingsUI(catalog) {
 
   el.innerHTML = `
     <div class="screen-header"><h2>Settings</h2><p>Manage device catalog and application configuration</p></div>
+
+    ${S.user.role === 'admin' ? `
+    <div class="card" style="margin-bottom:20px;border-left:4px solid var(--blue)">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Database Backup
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin:4px 0 14px">Download a full export of all data — orders, inventory, purchase orders, testing results. Store safely after each import session.</p>
+      <button class="btn btn-primary" onclick="doBackupDownload()" id="backup-btn">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download Full Backup (.xlsx)
+      </button>
+    </div>` : ''}
 
     <div class="card" style="margin-bottom:20px">
       <div class="card-title">Color Options</div>

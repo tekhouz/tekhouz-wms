@@ -1086,6 +1086,45 @@ app.put('/api/users/:id/password', auth, adminOnly, async (req, res) => {
   }
 });
 
+// ─── Full Database Backup ─────────────────────────────────────────────────────
+app.get('/api/backup/download', auth, adminOnly, async (req, res) => {
+  try {
+    const [orders, testing, inventory, invTesting, purchaseOrders, poItems, users] = await Promise.all([
+      dbAll('SELECT * FROM daily_orders ORDER BY id'),
+      dbAll('SELECT * FROM order_testing ORDER BY id'),
+      dbAll('SELECT * FROM inventory ORDER BY id'),
+      dbAll('SELECT * FROM inventory_testing ORDER BY id'),
+      dbAll('SELECT * FROM purchase_orders ORDER BY id'),
+      dbAll('SELECT * FROM po_items ORDER BY id'),
+      dbAll('SELECT id, username, role, created_at FROM users ORDER BY id'),
+    ]);
+
+    const wb = XLSX.utils.book_new();
+    const addSheet = (name, rows) => {
+      if (!rows.length) { XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([[`No data in ${name}`]]), name); return; }
+      const headers = Object.keys(rows[0]);
+      const data = [headers, ...rows.map(r => headers.map(h => r[h] ?? ''))];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), name);
+    };
+
+    addSheet('Daily Orders', orders);
+    addSheet('Order Testing', testing);
+    addSheet('Inventory', inventory);
+    addSheet('Inventory Testing', invTesting);
+    addSheet('Purchase Orders', purchaseOrders);
+    addSheet('PO Items', poItems);
+    addSheet('Users', users);
+
+    const date = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Disposition', `attachment; filename="Tekhouz-Backup-${date}.xlsx"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Catalog Settings ─────────────────────────────────────────────────────────
 app.get('/api/settings/catalog', auth, async (req, res) => {
   try {
