@@ -336,13 +336,14 @@ app.get('/api/dashboard', auth, (req, res) => {
 
 // ─── Daily Orders ─────────────────────────────────────────────────────────────
 app.get('/api/orders', auth, (req, res) => {
-  const { date, source, search, page = 1, limit = 100 } = req.query;
+  const { date, source, search, delivery, page = 1, limit = 100 } = req.query;
   let q = `SELECT o.*, COALESCE(t.delivery_status,'Pending') delivery_status,
-           t.cosmetic_grade, t.overall_status, t.id test_id, t.tested_by, t.test_date
+           t.cosmetic_grade, t.overall_status, t.id test_id, t.tested_by, t.test_date, t.notes
            FROM daily_orders o LEFT JOIN order_testing t ON o.id = t.order_row_id WHERE 1=1`;
   const p = [];
   if (date) { q += ' AND o.import_date = ?'; p.push(date); }
   if (source) { q += ' AND o.source = ?'; p.push(source); }
+  if (delivery) { q += " AND COALESCE(t.delivery_status,'Pending') = ?"; p.push(delivery); }
   if (search) { q += ' AND (o.serial_no LIKE ? OR o.order_id LIKE ? OR o.item_name LIKE ? OR o.item_sku LIKE ? OR o.recipient LIKE ?)'; const s = `%${search}%`; p.push(s,s,s,s,s); }
   q += ' ORDER BY o.created_at DESC LIMIT ? OFFSET ?';
   p.push(parseInt(limit), (parseInt(page)-1) * parseInt(limit));

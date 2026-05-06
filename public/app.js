@@ -9,7 +9,7 @@ const S = {
   users: [],
   po: { pos: [], total: 0, filters: { search: '', vendor: '', month: '', year: '' }, currentPo: null, poItems: [], itemSearch: '' },
   catalog: null,
-  oFilters: { date: '', source: '', search: '' },
+  oFilters: { date: '', source: '', search: '', delivery: '' },
   iFilters: { month: '', year: '', vendor: '', device_type: '', lot_id: '', search: '' },
 };
 
@@ -412,6 +412,7 @@ async function loadOrders() {
     if (S.oFilters.date) p.set('date', S.oFilters.date);
     if (S.oFilters.source) p.set('source', S.oFilters.source);
     if (S.oFilters.search) p.set('search', S.oFilters.search);
+    if (S.oFilters.delivery) p.set('delivery', S.oFilters.delivery);
     const d = await api('GET', '/api/orders?' + p);
     S.orders = d;
 
@@ -448,6 +449,9 @@ async function loadOrders() {
           <td><span class="badge badge-shipped" title="Ship date">${fmtDate(o.import_date)}</span></td>
           <td>${overallBadge}</td>
           <td>${deliveryBadge(o.delivery_status)}</td>
+          <td style="max-width:180px" title="${esc(o.notes||'')}">
+            ${o.notes ? `<span style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--txt-secondary,#64748b)">${esc(o.notes)}</span>` : `<span style="color:var(--muted);font-size:12px">—</span>`}
+          </td>
           <td>
             <div style="display:flex;gap:4px">
               <button class="btn btn-primary btn-sm btn-icon" title="Test / Update" onclick="openOrderTesting(${o.id})">
@@ -457,18 +461,27 @@ async function loadOrders() {
             </div>
           </td>
         </tr>`;
-    }).join('') || `<tr><td colspan="13"><div class="empty-state"><p>No orders found. Import from Excel or ShipStation to get started.</p></div></td></tr>`;
+    }).join('') || `<tr><td colspan="14"><div class="empty-state"><p>No orders found. Import from Excel or ShipStation to get started.</p></div></td></tr>`;
 
     el.innerHTML = `
       <div class="screen-header"><h2>Daily Orders</h2><p>${d.total} total orders · click any Serial No. cell to enter/edit it</p></div>
       <div class="toolbar">
         <div class="toolbar-left">
-          <input class="search-input" type="text" placeholder="Search serial, order ID, item…" value="${esc(S.oFilters.search)}" oninput="S.oFilters.search=this.value" onkeydown="if(event.key==='Enter')loadOrders()">
+          <input class="search-input" type="text" placeholder="Search serial, order ID, item, SKU…" value="${esc(S.oFilters.search)}" oninput="S.oFilters.search=this.value" onkeydown="if(event.key==='Enter')loadOrders()">
           <input type="date" title="Filter by Ship Date" value="${S.oFilters.date}" onchange="S.oFilters.date=this.value;loadOrders()" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px;color:${S.oFilters.date?'var(--txt)':'var(--muted)'}">
           <select onchange="S.oFilters.source=this.value;loadOrders()">
             <option value="">All Sources</option>${srcOpts}
           </select>
-          <button class="btn btn-outline btn-sm" onclick="S.oFilters={date:'',source:'',search:''};loadOrders()">Clear</button>
+          <select onchange="S.oFilters.delivery=this.value;loadOrders()">
+            <option value="" ${!S.oFilters.delivery?'selected':''}>All Delivery</option>
+            <option value="Pending" ${S.oFilters.delivery==='Pending'?'selected':''}>Pending</option>
+            <option value="Ready to Ship" ${S.oFilters.delivery==='Ready to Ship'?'selected':''}>Ready to Ship</option>
+            <option value="Shipped" ${S.oFilters.delivery==='Shipped'?'selected':''}>Shipped</option>
+            <option value="Delivered" ${S.oFilters.delivery==='Delivered'?'selected':''}>Delivered</option>
+            <option value="Returned" ${S.oFilters.delivery==='Returned'?'selected':''}>Returned</option>
+            <option value="Cancelled" ${S.oFilters.delivery==='Cancelled'?'selected':''}>Cancelled</option>
+          </select>
+          <button class="btn btn-outline btn-sm" onclick="S.oFilters={date:'',source:'',search:'',delivery:''};loadOrders()">Clear</button>
         </div>
         <div class="toolbar-right">
           <button class="btn btn-outline" style="border-color:var(--purple);color:var(--purple)" onclick="openScanModal()">
@@ -487,7 +500,7 @@ async function loadOrders() {
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th>Recipient</th><th>Ship Paid</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th>Recipient</th><th>Ship Paid</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Notes</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <div class="table-foot"><span>Showing ${d.orders.length} of ${d.total}</span></div>
