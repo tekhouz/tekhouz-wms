@@ -427,17 +427,23 @@ async function loadOrders() {
       const snHtml = o.serial_no
         ? `<span class="mono fw600" style="color:var(--txt)">${esc(o.serial_no)}</span>`
         : `<span style="color:var(--muted);font-style:italic;font-size:12px">— click to add —</span>`;
+      const shippingPaidHtml = o.shipping_paid > 0
+        ? `<span style="color:var(--green,#16a34a);font-weight:600">$${Number(o.shipping_paid).toFixed(2)}</span>`
+        : `<span style="color:var(--muted)">—</span>`;
       return `
         <tr>
           <td><span class="tag">${esc(o.source)}</span></td>
-          <td class="mono">${esc(o.order_id)}</td>
+          <td class="mono" style="font-size:12px">${esc(o.order_id)}</td>
           <td id="sn-cell-${o.id}" onclick="editSerialNo(${o.id},'${(o.serial_no||'').replace(/'/g,"\\'")}',this)"
               style="cursor:pointer;min-width:130px" title="Click to edit Serial No.">
             ${snHtml}
             <svg style="width:11px;height:11px;opacity:.4;margin-left:4px;vertical-align:middle" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
           </td>
-          <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.item_name)}">${esc(o.item_name)}</td>
-          <td>${esc(o.recipient)}</td>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.item_name)}">${esc(o.item_name)}</td>
+          <td><span class="mono" style="font-size:11px;background:var(--surface2,#f1f5f9);padding:2px 6px;border-radius:4px;white-space:nowrap">${esc(o.item_sku||'—')}</span></td>
+          <td style="text-align:center;font-weight:600">${o.qty||1}</td>
+          <td style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.recipient)}">${esc(o.recipient||'—')}</td>
+          <td>${shippingPaidHtml}</td>
           <td>${fmtDate(o.order_date)}</td>
           <td><span class="badge badge-shipped" title="Ship date">${fmtDate(o.import_date)}</span></td>
           <td>${overallBadge}</td>
@@ -451,7 +457,7 @@ async function loadOrders() {
             </div>
           </td>
         </tr>`;
-    }).join('') || `<tr><td colspan="10"><div class="empty-state"><p>No orders found. Import from Excel or ShipStation to get started.</p></div></td></tr>`;
+    }).join('') || `<tr><td colspan="13"><div class="empty-state"><p>No orders found. Import from Excel or ShipStation to get started.</p></div></td></tr>`;
 
     el.innerHTML = `
       <div class="screen-header"><h2>Daily Orders</h2><p>${d.total} total orders · click any Serial No. cell to enter/edit it</p></div>
@@ -481,7 +487,7 @@ async function loadOrders() {
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>Recipient</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th>Recipient</th><th>Ship Paid</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <div class="table-foot"><span>Showing ${d.orders.length} of ${d.total}</span></div>

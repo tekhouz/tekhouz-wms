@@ -200,6 +200,7 @@ try { db.exec("ALTER TABLE po_items ADD COLUMN inventory_id INTEGER"); } catch {
 try { db.exec("ALTER TABLE inventory ADD COLUMN status TEXT DEFAULT 'available'"); } catch {}
 try { db.exec("ALTER TABLE inventory ADD COLUMN sold_order_id INTEGER"); } catch {}
 try { db.exec("ALTER TABLE inventory ADD COLUMN sold_at DATETIME"); } catch {}
+try { db.exec("ALTER TABLE daily_orders ADD COLUMN shipping_paid REAL DEFAULT 0"); } catch {}
 
 // Seed default admin
 const adminExists = db.prepare('SELECT id FROM users WHERE username = ?').get('admin');
@@ -342,7 +343,7 @@ app.get('/api/orders', auth, (req, res) => {
   const p = [];
   if (date) { q += ' AND o.import_date = ?'; p.push(date); }
   if (source) { q += ' AND o.source = ?'; p.push(source); }
-  if (search) { q += ' AND (o.serial_no LIKE ? OR o.order_id LIKE ? OR o.item_name LIKE ? OR o.recipient LIKE ?)'; const s = `%${search}%`; p.push(s,s,s,s); }
+  if (search) { q += ' AND (o.serial_no LIKE ? OR o.order_id LIKE ? OR o.item_name LIKE ? OR o.item_sku LIKE ? OR o.recipient LIKE ?)'; const s = `%${search}%`; p.push(s,s,s,s,s); }
   q += ' ORDER BY o.created_at DESC LIMIT ? OFFSET ?';
   p.push(parseInt(limit), (parseInt(page)-1) * parseInt(limit));
 
@@ -455,18 +456,19 @@ app.post('/api/orders/shipstation', auth, async (req, res) => {
     const orders = data.orders || [];
 
     const stmt = db.prepare(`INSERT INTO daily_orders
-      (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, shipping_paid)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
     let count = 0;
     db.transaction(() => {
       for (const o of orders) {
         const oDate = o.orderDate ? o.orderDate.split('T')[0] : importDate;
         const store = o.advancedOptions?.storeName || 'ShipStation';
+        const shippingPaid = o.shippingAmount || 0;
         for (const item of o.items || []) {
           stmt.run(importDate, store, '', String(o.orderNumber || o.orderId),
             oDate, item.sku || '', item.name || '',
-            o.shipTo?.name || '', item.quantity || 1, item.unitPrice || 0);
+            o.shipTo?.name || '', item.quantity || 1, item.unitPrice || 0, shippingPaid);
           count++;
         }
       }
