@@ -1071,6 +1071,7 @@ async function loadInventory() {
     if (S.iFilters.device_type) p.set('device_type', S.iFilters.device_type);
     if (S.iFilters.lot_id) p.set('lot_id', S.iFilters.lot_id);
     if (S.iFilters.search) p.set('search', S.iFilters.search);
+    p.set('limit', 10000);
     const d = await api('GET', '/api/inventory?' + p);
     S.inventory = d;
 
@@ -1296,7 +1297,7 @@ async function loadInventory() {
         </div>
       </div>
       <div class="inv-model-cards">${cardsHtml}</div>
-      <div style="padding:10px 0;color:var(--muted);font-size:12px">Showing ${displayItems.length} of ${d.total} items</div>`;
+      <div style="padding:10px 0;color:var(--muted);font-size:12px">${displayItems.length === d.total ? `${d.total} items total` : `Showing ${displayItems.length} of ${d.total} items`}</div>`;
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }
