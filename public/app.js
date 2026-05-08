@@ -114,21 +114,65 @@ function updateSkuGrade(sku, newGrade) {
   return sku + '-' + newGrade;
 }
 
+// Color name → SKU abbreviation map (matches DEFAULT_CATALOG colors in server)
+const COLOR_ABBR_MAP = {
+  'Space Gray':'SG','Silver':'SL','Gold':'GD','Rose Gold':'RG',
+  'Midnight':'MN','Starlight':'ST','Blue':'BL','Green':'GN',
+  'Purple':'PR','Red':'RD','Black':'BK','White':'WT',
+  'Yellow':'YL','Orange':'OR','Coral':'CO','Pacific Blue':'PB',
+  'Alpine Green':'AG','Deep Purple':'DP','Natural Titanium':'NT',
+  'Black Titanium':'BKT','White Titanium':'WTT'
+};
+function colorToAbbr(name) {
+  if (!name) return '';
+  return COLOR_ABBR_MAP[name] || name.replace(/\s+/g,'').slice(0,3).toUpperCase();
+}
+
+// Replace the color abbreviation segment in a SKU (e.g. ipad-32gb-SG-A → ipad-32gb-SL-A)
+function updateSkuColor(sku, newColorAbbr) {
+  if (!sku || !newColorAbbr) return sku;
+  const grades = ['A+','A','B+','B','C','D-Fixable','D-Parts','S-Scrap'];
+  const allAbbrs = Object.values(COLOR_ABBR_MAP);
+  // Strip grade suffix
+  let gradeSuffix = '', base = sku;
+  for (const g of grades) {
+    if (sku.toUpperCase().endsWith('-' + g.toUpperCase())) {
+      gradeSuffix = '-' + g;
+      base = sku.slice(0, sku.length - g.length - 1);
+      break;
+    }
+  }
+  // Replace known color abbreviation at end of base
+  const baseUpper = base.toUpperCase();
+  for (const abbr of allAbbrs) {
+    if (baseUpper.endsWith('-' + abbr.toUpperCase())) {
+      return base.slice(0, base.length - abbr.length) + newColorAbbr + gradeSuffix;
+    }
+  }
+  // No match — insert before grade
+  return base + '-' + newColorAbbr + gradeSuffix;
+}
+
 // Live preview shown below the Overall Grade dropdown in the testing modal
-function previewSkuGrade() {
+// Handles both grade and color changes in one preview line
+function previewSkuUpdate() {
   const grade = document.getElementById('t-overall_grade')?.value;
+  const colorName = document.getElementById('t-color')?.value;
   const currentSku = document.getElementById('t-current-sku')?.value;
   const preview = document.getElementById('sku-grade-preview');
   if (!preview) return;
-  if (!grade || !currentSku) { preview.innerHTML = ''; return; }
-  const newSku = updateSkuGrade(currentSku, grade);
+  if (!currentSku) { preview.innerHTML = ''; return; }
+  let newSku = currentSku;
+  if (grade) newSku = updateSkuGrade(newSku, grade);
+  if (colorName) { const abbr = colorToAbbr(colorName); if (abbr) newSku = updateSkuColor(newSku, abbr); }
   const changed = newSku !== currentSku;
   const gradeColors = { 'A+':'#15803d', A:'#22c55e', 'B+':'#0ea5e9', B:'#3b82f6', C:'#f59e0b', 'D-Fixable':'#f97316', 'D-Parts':'#ef4444', 'S-Scrap':'#7f1d1d' };
-  const col = gradeColors[grade] || '#64748b';
+  const col = gradeColors[grade] || '#2563eb';
   preview.innerHTML = changed
-    ? `<span style="color:var(--muted)">SKU will update to: </span><span style="font-family:monospace;font-weight:700;color:${col}">${esc(newSku)}</span>`
+    ? `<span style="color:var(--muted)">SKU → </span><span style="font-family:monospace;font-weight:700;color:${col}">${esc(newSku)}</span>`
     : `<span style="color:var(--muted);font-style:italic">SKU unchanged</span>`;
 }
+function previewSkuGrade() { previewSkuUpdate(); }
 function fmtPrice(v) { return v ? '$' + parseFloat(v).toFixed(2) : '—'; }
 function fmtDate(v) {
   if (!v) return '—';
@@ -1746,7 +1790,7 @@ async function openInventoryTesting(itemId) {
 
       <div class="form-section">
         <div class="form-section-title">Device & Overall Results</div>
-        <div class="form-grid form-grid-3">
+        <div class="form-grid form-grid-4">
           <div class="form-group">
             <label>Device Type</label>
             <select id="t-device_type" onchange="refreshTestFields(${itemId}, 'inventory')">
@@ -1756,9 +1800,16 @@ async function openInventoryTesting(itemId) {
           <div class="form-group">
             <label>Overall Grade</label>
             <input type="hidden" id="t-current-sku" value="${esc(item.sku||'')}">
-            <select id="t-overall_grade" onchange="previewSkuGrade()">
+            <select id="t-overall_grade" onchange="previewSkuUpdate()">
               <option value="">— Select —</option>
               ${['A+','A','B+','B','C','D-Fixable','D-Parts','S-Scrap'].map(g=>`<option ${(existing?.overall_grade||'')===g?'selected':''}>${g}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Color</label>
+            <select id="t-color" onchange="previewSkuUpdate()">
+              <option value="">— Select —</option>
+              ${(S.catalog?.colors||[]).map(c=>`<option value="${esc(c)}" ${(item.color||'')===c?'selected':''}>${esc(c)} (${colorToAbbr(c)})</option>`).join('')}
             </select>
             <div id="sku-grade-preview" style="margin-top:5px;font-size:11px;min-height:16px"></div>
           </div>
@@ -1822,8 +1873,8 @@ async function openInventoryTesting(itemId) {
     </div>`);
 
   buildTestFields('test-fields-container', deviceType, existing, 'inventory');
-  // Show preview for any pre-selected grade
-  setTimeout(previewSkuGrade, 0);
+  // Show preview for any pre-selected grade/color
+  setTimeout(previewSkuUpdate, 0);
 }
 
 async function saveInventoryTesting(itemId) {
@@ -1851,11 +1902,15 @@ async function saveInventoryTesting(itemId) {
   const lockStatus = gv('t-lock_status'); if (lockStatus !== undefined) invUpdate.lock_status = lockStatus;
   const carrier = gv('t-locked_carrier'); if (carrier !== undefined) invUpdate.carrier = carrier;
 
-  // Auto-update SKU grade segment when technician selects Overall Grade
+  // Auto-update SKU: apply color abbreviation then grade segment
   const newGrade = gv('t-overall_grade');
+  const newColor = gv('t-color');
   const currentSku = gv('t-current-sku');
-  if (newGrade && currentSku) {
-    const updatedSku = updateSkuGrade(currentSku, newGrade);
+  if (newColor) invUpdate.color = newColor;
+  if (currentSku) {
+    let updatedSku = currentSku;
+    if (newColor) { const abbr = colorToAbbr(newColor); if (abbr) updatedSku = updateSkuColor(updatedSku, abbr); }
+    if (newGrade) updatedSku = updateSkuGrade(updatedSku, newGrade);
     if (updatedSku !== currentSku) invUpdate.sku = updatedSku;
   }
 
