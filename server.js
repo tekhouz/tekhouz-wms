@@ -953,6 +953,16 @@ app.delete('/api/inventory/:id', auth, adminOnly, async (req, res) => {
   }
 });
 
+app.post('/api/inventory/bulk-delete', auth, adminOnly, async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'No IDs provided' });
+    const placeholders = ids.map(() => '?').join(',');
+    const result = await dbRun(`DELETE FROM inventory WHERE id IN (${placeholders})`, ids);
+    res.json({ deleted: result.affectedRows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/inventory/import', auth, upload.single('file'), async (req, res) => {
   try {
     const { vendor, month, year, device_type } = req.body;

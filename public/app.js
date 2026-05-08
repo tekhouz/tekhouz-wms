@@ -12,6 +12,7 @@ const S = {
   oFilters: { date: '', source: '', search: '', delivery: '' },
   _oTypeTab: 'all',
   iFilters: { month: '', year: '', vendor: '', device_type: '', lot_id: '', search: '' },
+  _invSelected: new Set(),
 };
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -1105,6 +1106,54 @@ async function renderInventory() {
   await loadInventory();
 }
 
+// ─── Inventory bulk-select helpers ──────────────────────────────────────────
+function toggleInvSelect(id, checked) {
+  if (checked) S._invSelected.add(id); else S._invSelected.delete(id);
+  updateInvBulkBar();
+}
+function toggleInvGroupSelect(gid, checked) {
+  const body = document.getElementById('inv-card-body-' + gid);
+  if (!body) return;
+  body.querySelectorAll('.inv-chk').forEach(chk => {
+    const id = parseInt(chk.dataset.id);
+    chk.checked = checked;
+    if (checked) S._invSelected.add(id); else S._invSelected.delete(id);
+  });
+  updateInvBulkBar();
+}
+function clearInvSelection() {
+  S._invSelected.clear();
+  document.querySelectorAll('.inv-chk').forEach(c => c.checked = false);
+  document.querySelectorAll('[id^="inv-chk-grp-"]').forEach(c => c.checked = false);
+  updateInvBulkBar();
+}
+function updateInvBulkBar() {
+  const bar = document.getElementById('inv-bulk-bar');
+  const cnt = document.getElementById('inv-bulk-count');
+  if (!bar) return;
+  const n = S._invSelected.size;
+  if (n > 0) { bar.classList.remove('hidden'); if (cnt) cnt.textContent = `${n} item${n!==1?'s':''} selected`; }
+  else bar.classList.add('hidden');
+}
+function restoreInvCheckboxes() {
+  S._invSelected.forEach(id => {
+    const chk = document.querySelector(`.inv-chk[data-id="${id}"]`);
+    if (chk) chk.checked = true;
+  });
+  updateInvBulkBar();
+}
+async function deleteSelectedInventory() {
+  const ids = [...S._invSelected];
+  if (!ids.length) return;
+  if (!confirm(`Permanently delete ${ids.length} item${ids.length!==1?'s':''}?\n\nThis cannot be undone.`)) return;
+  try {
+    const r = await api('POST', '/api/inventory/bulk-delete', { ids });
+    showToast(`✓ Deleted ${r.deleted} item${r.deleted!==1?'s':''}`);
+    S._invSelected.clear();
+    await loadInventory();
+  } catch(ex) { showToast(ex.message, 'error'); }
+}
+
 async function loadInventory() {
   const el = document.getElementById('screen-inventory');
   try {
@@ -1215,6 +1264,7 @@ async function loadInventory() {
 
           unitRows += `
             <tr id="inv-row-${item.id}">
+              ${S.user.role==='admin'?`<td class="inv-chk-wrap"><input type="checkbox" class="inv-chk" data-id="${item.id}" onchange="toggleInvSelect(${item.id},this.checked)"></td>`:''}
               <td style="min-width:100px">
                 ${item.status==='sold'?`<span style="display:inline-block;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:4px;font-size:9px;font-weight:800;padding:1px 5px;letter-spacing:.04em;margin-bottom:3px">SOLD</span><br>`:''}
                 <div style="font-size:11px;font-weight:600">${esc(item.vendor)}</div>
@@ -1264,7 +1314,7 @@ async function loadInventory() {
               </td>
             </tr>
             <tr id="inv-det-${item.id}" style="display:none">
-              <td colspan="7" style="padding:0">
+              <td colspan="${S.user.role==='admin'?8:7}" style="padding:0">
                 <div class="inv-det-panel">
                   <div style="font-size:11px;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">
                     Test Results · S/N: ${esc(item.serial_number||'—')}
@@ -1289,6 +1339,7 @@ async function loadInventory() {
           <div class="inv-card-body" id="inv-card-body-${gid}">
             <table class="inv-unit-table">
               <thead><tr>
+                ${S.user.role==='admin'?`<th class="inv-chk-wrap"><input type="checkbox" class="inv-chk" title="Select all in group" onchange="toggleInvGroupSelect('${gid}',this.checked)" id="inv-chk-grp-${gid}"></th>`:''}
                 <th>Vendor / Period</th><th>Serial / IMEI</th><th>Specs</th>
                 <th>Lock / MDM</th><th style="text-align:center">Overall Grade</th>
                 <th>Condition</th><th>Actions</th>
@@ -1341,7 +1392,17 @@ async function loadInventory() {
         </div>
       </div>
       <div class="inv-model-cards">${cardsHtml}</div>
-      <div style="padding:10px 0;color:var(--muted);font-size:12px">${displayItems.length === d.total ? `${d.total} items total` : `Showing ${displayItems.length} of ${d.total} items`}</div>`;
+      <div style="padding:10px 0;color:var(--muted);font-size:12px">${displayItems.length === d.total ? `${d.total} items total` : `Showing ${displayItems.length} of ${d.total} items`}</div>
+      ${S.user.role==='admin'?`
+      <div id="inv-bulk-bar" class="inv-bulk-bar hidden">
+        <span class="bulk-count" id="inv-bulk-count">0 items selected</span>
+        <button class="bulk-clr" onclick="clearInvSelection()">✕ Clear</button>
+        <button class="bulk-del" onclick="deleteSelectedInventory()">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M5 6l1-3h12l1 3"/></svg>
+          Delete Selected
+        </button>
+      </div>`:''}`;
+    restoreInvCheckboxes();
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }

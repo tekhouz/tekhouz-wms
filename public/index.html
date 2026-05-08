@@ -118,6 +118,15 @@ td.mono{font-family:'SF Mono',Menlo,monospace;font-size:12px}
 .inv-tab:not(.active) .tab-count{background:#f1f5f9;color:var(--muted)}
 
 /* ─── Model Accordion Cards ─── */
+.inv-bulk-bar{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#1e293b;color:#fff;border-radius:14px;padding:11px 20px;display:flex;align-items:center;gap:14px;box-shadow:0 6px 24px rgba(0,0,0,.3);z-index:1000;font-size:13px;font-weight:600;transition:opacity .2s,transform .2s;white-space:nowrap}
+.inv-bulk-bar.hidden{opacity:0;pointer-events:none;transform:translateX(-50%) translateY(16px)}
+.inv-bulk-bar .bulk-count{color:#94a3b8}
+.inv-bulk-bar .bulk-del{background:#ef4444;color:#fff;border:none;border-radius:8px;padding:6px 14px;font-size:12px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px}
+.inv-bulk-bar .bulk-del:hover{background:#dc2626}
+.inv-bulk-bar .bulk-clr{background:rgba(255,255,255,.1);color:#fff;border:1px solid rgba(255,255,255,.2);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer}
+.inv-bulk-bar .bulk-clr:hover{background:rgba(255,255,255,.2)}
+.inv-chk-wrap{width:34px;text-align:center;padding:8px 4px !important}
+.inv-chk{width:15px;height:15px;cursor:pointer;accent-color:var(--blue)}
 .inv-model-cards{display:flex;flex-direction:column;gap:10px;padding:4px 0 16px}
 .inv-model-card{border:1.5px solid var(--border);border-radius:10px;overflow:hidden;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.04);transition:.15s}
 .inv-model-card:hover{box-shadow:0 2px 8px rgba(0,0,0,.08)}
