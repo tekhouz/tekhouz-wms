@@ -13,6 +13,8 @@ const S = {
   _oTypeTab: 'all',
   iFilters: { month: '', year: '', vendor: '', device_type: '', lot_id: '', search: '' },
   _invSelected: new Set(),
+  _ordSelected: new Set(),
+  _poItemSelected: new Set(),
 };
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -451,6 +453,55 @@ async function renderOrders() {
   await loadOrders();
 }
 
+// ─── Daily Orders bulk-select helpers ────────────────────────────────────────
+function toggleOrderSelect(id, checked) {
+  if (checked) S._ordSelected.add(id); else S._ordSelected.delete(id);
+  updateOrderBulkBar();
+}
+function toggleAllOrders(checked) {
+  document.querySelectorAll('.ord-chk').forEach(chk => {
+    const id = parseInt(chk.dataset.id);
+    chk.checked = checked;
+    if (checked) S._ordSelected.add(id); else S._ordSelected.delete(id);
+  });
+  updateOrderBulkBar();
+}
+function clearOrderSelection() {
+  S._ordSelected.clear();
+  document.querySelectorAll('.ord-chk').forEach(c => c.checked = false);
+  const hdr = document.getElementById('ord-chk-all'); if (hdr) hdr.checked = false;
+  updateOrderBulkBar();
+}
+function updateOrderBulkBar() {
+  const bar = document.getElementById('ord-bulk-bar');
+  const cnt = document.getElementById('ord-bulk-count');
+  if (!bar) return;
+  const n = S._ordSelected.size;
+  if (n > 0) { bar.classList.remove('hidden'); if (cnt) cnt.textContent = `${n} order${n!==1?'s':''} selected`; }
+  else bar.classList.add('hidden');
+}
+function restoreOrderCheckboxes() {
+  S._ordSelected.forEach(id => {
+    const chk = document.querySelector(`.ord-chk[data-id="${id}"]`);
+    if (chk) chk.checked = true;
+  });
+  const allChks = document.querySelectorAll('.ord-chk');
+  const hdr = document.getElementById('ord-chk-all');
+  if (hdr && allChks.length > 0) hdr.checked = [...allChks].every(c => c.checked);
+  updateOrderBulkBar();
+}
+async function deleteSelectedOrders() {
+  const ids = [...S._ordSelected];
+  if (!ids.length) return;
+  if (!confirm(`Permanently delete ${ids.length} order${ids.length!==1?'s':''}?\n\nThis cannot be undone.`)) return;
+  try {
+    const r = await api('POST', '/api/orders/bulk-delete', { ids });
+    showToast(`✓ Deleted ${r.deleted} order${r.deleted!==1?'s':''}`);
+    S._ordSelected.clear();
+    await loadOrders();
+  } catch(ex) { showToast(ex.message, 'error'); }
+}
+
 async function loadOrders() {
   const el = document.getElementById('screen-orders');
   try {
@@ -495,6 +546,7 @@ async function loadOrders() {
         : `<span style="color:var(--muted)">—</span>`;
       return `
         <tr>
+          ${S.user.role==='admin'?`<td class="inv-chk-wrap"><input type="checkbox" class="ord-chk inv-chk" data-id="${o.id}" onchange="toggleOrderSelect(${o.id},this.checked)"></td>`:''}
           <td><span class="tag">${esc(o.source)}</span></td>
           <td class="mono" style="font-size:12px">${esc(o.order_id)}</td>
           <td id="sn-cell-${o.id}" onclick="editSerialNo(${o.id},'${(o.serial_no||'').replace(/'/g,"\\'")}',this)"
@@ -523,7 +575,7 @@ async function loadOrders() {
             </div>
           </td>
         </tr>`;
-    }).join('') || `<tr><td colspan="14"><div class="empty-state"><p>No orders found. Import from Excel or ShipStation to get started.</p></div></td></tr>`;
+    }).join('') || `<tr><td colspan="${S.user.role==='admin'?15:14}"><div class="empty-state"><p>No orders found. Import from Excel or ShipStation to get started.</p></div></td></tr>`;
 
     el.innerHTML = `
       <div class="screen-header"><h2>Daily Orders</h2><p>${d.total} total orders · click any Serial No. cell to enter/edit it</p></div>
@@ -563,11 +615,24 @@ async function loadOrders() {
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th>Recipient</th><th>Ship Paid</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Notes</th><th>Actions</th></tr></thead>
+          <thead><tr>
+            ${S.user.role==='admin'?`<th class="inv-chk-wrap"><input type="checkbox" class="inv-chk" id="ord-chk-all" title="Select all" onchange="toggleAllOrders(this.checked)"></th>`:''}
+            <th>Source</th><th>Order ID</th><th>Serial No. ✏</th><th>Item</th><th>SKU</th><th style="text-align:center">Qty</th><th>Recipient</th><th>Ship Paid</th><th>Order Date</th><th>Ship Date</th><th>Test Status</th><th>Delivery</th><th>Notes</th><th>Actions</th>
+          </tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <div class="table-foot"><span>Showing ${filteredOrders.length} of ${d.total}</span></div>
-      </div>`;
+      </div>
+      ${S.user.role==='admin'?`
+      <div id="ord-bulk-bar" class="inv-bulk-bar hidden">
+        <span class="bulk-count" id="ord-bulk-count">0 orders selected</span>
+        <button class="bulk-clr" onclick="clearOrderSelection()">✕ Clear</button>
+        <button class="bulk-del" onclick="deleteSelectedOrders()">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M5 6l1-3h12l1 3"/></svg>
+          Delete Selected
+        </button>
+      </div>`:''}`;
+    restoreOrderCheckboxes();
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }
@@ -2273,6 +2338,55 @@ async function openPODetail(poId) {
   await renderPODetail(S.po.currentPo);
 }
 
+// ─── PO Items bulk-select helpers ────────────────────────────────────────────
+function togglePoItemSelect(id, checked) {
+  if (checked) S._poItemSelected.add(id); else S._poItemSelected.delete(id);
+  updatePoItemBulkBar();
+}
+function toggleAllPoItems(checked) {
+  document.querySelectorAll('.poi-chk').forEach(chk => {
+    const id = parseInt(chk.dataset.id);
+    chk.checked = checked;
+    if (checked) S._poItemSelected.add(id); else S._poItemSelected.delete(id);
+  });
+  updatePoItemBulkBar();
+}
+function clearPoItemSelection() {
+  S._poItemSelected.clear();
+  document.querySelectorAll('.poi-chk').forEach(c => c.checked = false);
+  const hdr = document.getElementById('poi-chk-all'); if (hdr) hdr.checked = false;
+  updatePoItemBulkBar();
+}
+function updatePoItemBulkBar() {
+  const bar = document.getElementById('poi-bulk-bar');
+  const cnt = document.getElementById('poi-bulk-count');
+  if (!bar) return;
+  const n = S._poItemSelected.size;
+  if (n > 0) { bar.classList.remove('hidden'); if (cnt) cnt.textContent = `${n} item${n!==1?'s':''} selected`; }
+  else bar.classList.add('hidden');
+}
+function restorePoItemCheckboxes() {
+  S._poItemSelected.forEach(id => {
+    const chk = document.querySelector(`.poi-chk[data-id="${id}"]`);
+    if (chk) chk.checked = true;
+  });
+  const allChks = document.querySelectorAll('.poi-chk');
+  const hdr = document.getElementById('poi-chk-all');
+  if (hdr && allChks.length > 0) hdr.checked = [...allChks].every(c => c.checked);
+  updatePoItemBulkBar();
+}
+async function deleteSelectedPoItems() {
+  const ids = [...S._poItemSelected];
+  if (!ids.length) return;
+  if (!confirm(`Permanently delete ${ids.length} PO item${ids.length!==1?'s':''}?\n\nThis cannot be undone.`)) return;
+  try {
+    const r = await api('POST', '/api/po-items/bulk-delete', { ids });
+    showToast(`✓ Deleted ${r.deleted} item${r.deleted!==1?'s':''}`);
+    S._poItemSelected.clear();
+    await renderPODetail(S.po.currentPo);
+  } catch(ex) { showToast(ex.message, 'error'); }
+}
+
 async function renderPODetail(po) {
   const el = document.getElementById('screen-po');
   if (!po.vendor_name) {
@@ -2296,6 +2410,7 @@ async function renderPODetail(po) {
 
     const rows = items.map((item, i) => `
       <tr>
+        ${S.user.role==='admin'?`<td class="inv-chk-wrap"><input type="checkbox" class="poi-chk inv-chk" data-id="${item.id}" onchange="togglePoItemSelect(${item.id},this.checked)"></td>`:''}
         <td style="color:var(--muted);font-size:11px">${i+1}</td>
         <td><span class="chip ${deviceTypeClass(item.device_type)}">${typeIcon(item.device_type)} ${item.device_type||'—'}</span></td>
         <td>
@@ -2327,7 +2442,7 @@ async function renderPODetail(po) {
             ${S.user.role==='admin'?`<button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="deletePOItem(${item.id})"><svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`:''}
           </div>
         </td>
-      </tr>`).join('') || `<tr><td colspan="9"><div class="empty-state"><p>No items yet. Click "Add Item" to add devices to this PO.</p></div></td></tr>`;
+      </tr>`).join('') || `<tr><td colspan="${S.user.role==='admin'?10:9}"><div class="empty-state"><p>No items yet. Click "Add Item" to add devices to this PO.</p></div></td></tr>`;
 
     el.innerHTML = `
       <div class="screen-header">
@@ -2386,11 +2501,24 @@ async function renderPODetail(po) {
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>Type</th><th>Brand / Model</th><th>Specs</th><th>Serial / IMEI</th><th>Qty</th><th>Price</th><th>Status</th><th>Actions</th></tr></thead>
+          <thead><tr>
+            ${S.user.role==='admin'?`<th class="inv-chk-wrap"><input type="checkbox" class="inv-chk" id="poi-chk-all" title="Select all" onchange="toggleAllPoItems(this.checked)"></th>`:''}
+            <th>#</th><th>Type</th><th>Brand / Model</th><th>Specs</th><th>Serial / IMEI</th><th>Qty</th><th>Price</th><th>Status</th><th>Actions</th>
+          </tr></thead>
           <tbody>${rows}</tbody>
         </table>
         <div class="table-foot"><span>${items.length} item${items.length!==1?'s':''}</span></div>
-      </div>`;
+      </div>
+      ${S.user.role==='admin'?`
+      <div id="poi-bulk-bar" class="inv-bulk-bar hidden">
+        <span class="bulk-count" id="poi-bulk-count">0 items selected</span>
+        <button class="bulk-clr" onclick="clearPoItemSelection()">✕ Clear</button>
+        <button class="bulk-del" onclick="deleteSelectedPoItems()">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M5 6l1-3h12l1 3"/></svg>
+          Delete Selected
+        </button>
+      </div>`:''}`;
+    restorePoItemCheckboxes();
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }

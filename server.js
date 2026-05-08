@@ -606,6 +606,16 @@ app.delete('/api/orders/:id', auth, adminOnly, async (req, res) => {
   }
 });
 
+app.post('/api/orders/bulk-delete', auth, adminOnly, async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'No IDs provided' });
+    const placeholders = ids.map(() => '?').join(',');
+    const result = await dbRun(`DELETE FROM daily_orders WHERE id IN (${placeholders})`, ids);
+    res.json({ deleted: result.affectedRows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── ShipStation ──────────────────────────────────────────────────────────────
 app.get('/api/settings/shipstation', auth, async (req, res) => {
   try {
@@ -1295,6 +1305,16 @@ app.delete('/api/po-items/:id', auth, adminOnly, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.post('/api/po-items/bulk-delete', auth, adminOnly, async (req, res) => {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'No IDs provided' });
+    const placeholders = ids.map(() => '?').join(',');
+    const result = await dbRun(`DELETE FROM po_items WHERE id IN (${placeholders})`, ids);
+    res.json({ deleted: result.affectedRows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/po-items/:id/receive', auth, async (req, res) => {
