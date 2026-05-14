@@ -224,6 +224,34 @@ td.mono{font-family:'SF Mono',Menlo,monospace;font-size:12px}
 .pill-tab.active{background:#fff;color:var(--blue);box-shadow:var(--sh);font-weight:600}
 .pill-tab:hover:not(.active){color:var(--txt)}
 
+/* ─── Return Media Gallery ─── */
+.media-dropzone{border:2px dashed var(--border);border-radius:10px;padding:28px 20px;text-align:center;cursor:pointer;transition:.2s;background:#fafbfc;position:relative}
+.media-dropzone:hover,.media-dropzone.drag-over{border-color:var(--blue);background:#eff6ff}
+.media-dropzone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.media-dropzone svg{width:32px;height:32px;color:var(--muted);margin:0 auto 8px}
+.media-dropzone p{font-size:13px;color:var(--muted);margin:0}
+.media-dropzone .dz-hint{font-size:11px;color:var(--muted);margin-top:4px}
+.media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-top:14px}
+.media-thumb{border-radius:8px;overflow:hidden;background:#f1f5f9;border:1.5px solid var(--border);position:relative;group}
+.media-thumb:hover .media-actions{opacity:1}
+.media-thumb img{width:100%;height:110px;object-fit:cover;display:block;cursor:pointer}
+.media-thumb .vid-thumb{width:100%;height:110px;background:#1e293b;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.media-thumb .vid-thumb svg{width:36px;height:36px;color:#fff;opacity:.85}
+.media-thumb-info{padding:6px 8px}
+.media-thumb-name{font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.media-thumb-meta{font-size:10px;color:#94a3b8;margin-top:1px}
+.media-actions{position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:.15s}
+.media-del-btn{background:rgba(220,38,38,.85);color:#fff;border:none;border-radius:5px;width:22px;height:22px;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.media-del-btn:hover{background:#dc2626}
+.media-caption{font-size:10px;color:var(--muted);padding:0 8px 6px;font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.media-upload-progress{background:#eff6ff;border-radius:6px;padding:10px 14px;margin-top:10px;font-size:12px;color:var(--blue);display:none}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;cursor:zoom-out}
+.lightbox img{max-width:92vw;max-height:88vh;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.lightbox video{max-width:92vw;max-height:88vh;border-radius:8px;outline:none}
+.lightbox-close{position:absolute;top:16px;right:20px;color:#fff;font-size:28px;cursor:pointer;font-weight:300;line-height:1;opacity:.8}
+.lightbox-close:hover{opacity:1}
+.lightbox-caption{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);color:#fff;font-size:13px;background:rgba(0,0,0,.5);padding:6px 16px;border-radius:20px;max-width:80vw;text-align:center}
+
 /* ─── Label Print ─── */
 #label-print-area{display:none}
 @media print{
@@ -284,6 +312,26 @@ td.mono{font-family:'SF Mono',Menlo,monospace;font-size:12px}
         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
         Purchase Orders
       </div>
+      <div class="nav-item" data-screen="requisitions" onclick="nav('requisitions')">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="12" y2="16"/></svg>
+        Parts Requisition
+      </div>
+      <div class="nav-item" data-screen="returns" onclick="nav('returns')">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6M3 10l6-6"/></svg>
+        Returns
+      </div>
+      <div class="nav-item" data-screen="parts-po" onclick="nav('parts-po')">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+        Parts PO
+      </div>
+      <div class="nav-item" data-screen="service-orders" onclick="nav('service-orders')">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
+        Service Orders
+      </div>
+      <div class="nav-item" data-screen="parts-inventory" onclick="nav('parts-inventory')">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg>
+        Parts Inventory
+      </div>
       <div class="nav-item admin-only" data-screen="users" onclick="nav('users')" style="display:none">
         <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
         Users
@@ -309,9 +357,14 @@ td.mono{font-family:'SF Mono',Menlo,monospace;font-size:12px}
     <div id="screen-dashboard" class="screen"></div>
     <div id="screen-orders" class="screen"></div>
     <div id="screen-inventory" class="screen"></div>
+    <div id="screen-returns" class="screen"></div>
     <div id="screen-users" class="screen"></div>
     <div id="screen-po" class="screen"></div>
     <div id="screen-settings" class="screen"></div>
+    <div id="screen-requisitions" class="screen"></div>
+    <div id="screen-parts-po" class="screen"></div>
+    <div id="screen-service-orders" class="screen"></div>
+    <div id="screen-parts-inventory" class="screen"></div>
   </main>
 </div>
 
@@ -322,6 +375,13 @@ td.mono{font-family:'SF Mono',Menlo,monospace;font-size:12px}
 
 <!-- Hidden label print area -->
 <div id="label-print-area"></div>
+
+<!-- Media Lightbox -->
+<div id="lightbox" class="lightbox" style="display:none" onclick="closeLightbox()">
+  <span class="lightbox-close" onclick="closeLightbox()">×</span>
+  <div id="lightbox-content"></div>
+  <div id="lightbox-caption" class="lightbox-caption" style="display:none"></div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
 <script src="app.js"></script>

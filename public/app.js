@@ -8,6 +8,11 @@ const S = {
   dashboard: null,
   users: [],
   po: { pos: [], total: 0, filters: { search: '', vendor: '', month: '', year: '' }, currentPo: null, poItems: [], itemSearch: '' },
+  returns: { list: [], stats: {}, filters: { status: '', return_from: '', search: '' } },
+  requisitions: { list: [], stats: {}, filters: { status: '', priority: '', part_category: '', search: '' } },
+  partspo: { list: [], stats: {}, filters: { status: '', vendor: '', search: '' } },
+  serviceorders: { list: [], stats: {}, filters: { status: '', technician: '', repair_type: '', search: '' } },
+  partsinventory: { list: [], stats: {}, filters: { category: '', part_type: '', search: '' } },
   catalog: null,
   oFilters: { date: '', source: '', search: '', delivery: '' },
   _oTypeTab: 'all',
@@ -84,7 +89,14 @@ function showApp() {
 }
 
 async function loadCatalog() {
-  try { S.catalog = await api('GET', '/api/settings/catalog'); } catch {}
+  try {
+    const catalog = await api('GET', '/api/settings/catalog');
+    if (!catalog.vendors || !catalog.vendors.length) {
+      catalog.vendors = [...VENDORS_DEFAULT];
+      try { await api('PUT', '/api/settings/catalog', catalog); } catch {}
+    }
+    S.catalog = catalog;
+  } catch {}
 }
 
 // ─── Navigation ────────────────────────────────────────────────────────────
@@ -94,7 +106,7 @@ function nav(screen) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('screen-' + screen).classList.add('active');
   document.querySelector(`.nav-item[data-screen="${screen}"]`)?.classList.add('active');
-  const renders = { dashboard: renderDashboard, orders: renderOrders, inventory: renderInventory, users: renderUsers, po: renderPurchaseOrders, settings: renderSettings };
+  const renders = { dashboard: renderDashboard, orders: renderOrders, inventory: renderInventory, returns: renderReturns, users: renderUsers, po: renderPurchaseOrders, settings: renderSettings, requisitions: renderRequisitions, 'parts-po': renderPartsPO, 'service-orders': renderServiceOrders, 'parts-inventory': renderPartsInventory };
   renders[screen]?.();
 }
 
@@ -2975,6 +2987,11 @@ async function renderSettings() {
   el.innerHTML = `<div class="screen-header"><h2>Settings</h2><p>Manage device catalog and application configuration</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
   try {
     const catalog = await api('GET', '/api/settings/catalog');
+    // Seed vendors from defaults if none saved yet
+    if (!catalog.vendors || !catalog.vendors.length) {
+      catalog.vendors = [...VENDORS_DEFAULT];
+      await api('PUT', '/api/settings/catalog', catalog);
+    }
     S.catalog = catalog;
     renderSettingsUI(catalog);
   } catch(ex) {
@@ -3022,6 +3039,22 @@ function renderSettingsUI(catalog) {
         Download Full Backup (.xlsx)
       </button>
     </div>` : ''}
+
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-title">Parts Vendors</div>
+      <p style="color:var(--muted);font-size:12px;margin:0 0 10px">Vendors available in Parts Purchase Orders and Requisitions.</p>
+      <div id="vendors-wrap" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        ${(catalog.vendors||[]).map(v=>`
+          <span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:12px">
+            ${esc(v)}
+            <button onclick="removeCatalogItem('vendors','${esc(v)}')" style="background:none;border:none;cursor:pointer;color:var(--muted);padding:0;font-size:14px;line-height:1" title="Remove">×</button>
+          </span>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="new-vendor" placeholder="Add new vendor…" style="flex:1;padding:6px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="addCatalogItem('vendors','new-vendor')">Add</button>
+      </div>
+    </div>
 
     <div class="card" style="margin-bottom:20px">
       <div class="card-title">Color Options</div>
@@ -3114,4 +3147,2542 @@ function removeCustomModel(brand, model) {
   if (!S.catalog?.models?.[brand]) return;
   S.catalog.models[brand] = S.catalog.models[brand].filter(m => m !== model);
   saveCatalog().then(() => renderSettingsUI(S.catalog));
+}
+
+// ─── RETURNS ───────────────────────────────────────────────────────────────────
+
+const RETURN_FROM_OPTIONS = ['Back Market','Amazon','eBay','Walmart','BestBuy','BestBuy CA','Reebelo','Reebelo CA','Appzlogic'];
+const RETURN_REASON_OPTIONS = ['Technical issue','Changed mind','Tekhouz shipment issue','Wrong item sent','Damaged in transit','Not as described','Missing accessories','Customer changed mind','Defective on arrival','Other'];
+const CONDITION_OPTIONS = ['Unlocked','Locked','Passcode Locked','MDM Locked','Dead'];
+const NEXT_ACTION_OPTIONS = ['Complete','Hold','N/A','Ops Action','Warehouse Action'];
+const RESELL_ACTION_OPTIONS = ['Yes','No','Need to test','We can repair','Battery replaced','Locked'];
+const FINAL_ACTION_OPTIONS = ['Same device sent back','Replacement sent','Back to inventory'];
+
+const RETURN_STATUS_MAP = {
+  awaiting_shipment: { label: 'Awaiting Shipment', color: '#d97706', bg: '#fffbeb' },
+  received:          { label: 'Received',           color: '#0891b2', bg: '#ecfeff' },
+  testing:           { label: 'Testing',            color: '#7c3aed', bg: '#faf5ff' },
+  ops_review:        { label: 'Ops Review',         color: '#2563eb', bg: '#eff6ff' },
+  resolved:          { label: 'Resolved',           color: '#16a34a', bg: '#f0fdf4' },
+};
+
+function returnStatusBadge(status) {
+  const s = RETURN_STATUS_MAP[status] || { label: status || '—', color: '#64748b', bg: '#f1f5f9' };
+  return `<span style="display:inline-flex;align-items:center;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:600;color:${s.color};background:${s.bg};white-space:nowrap">${s.label}</span>`;
+}
+
+function returnGradeBadge(g) {
+  if (!g) return '<span style="color:#94a3b8">—</span>';
+  const colors = { A:'#16a34a', B:'#2563eb', C:'#d97706', D:'#dc2626' };
+  const c = colors[g.toUpperCase()] || '#64748b';
+  return `<span style="font-weight:700;color:${c}">${g}</span>`;
+}
+
+function testBadgeSmall(v) {
+  if (!v || v === 'Not Tested') return `<span style="color:#94a3b8;font-size:11px">—</span>`;
+  const c = v === 'Pass' ? '#16a34a' : v === 'Fail' ? '#dc2626' : '#64748b';
+  return `<span style="color:${c};font-size:11px;font-weight:600">${v}</span>`;
+}
+
+function fmtDateShort(v) {
+  if (!v) return '—';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    const [y, m, d] = v.split('-').map(Number);
+    return new Date(y, m-1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  return v;
+}
+
+async function renderReturns() {
+  const el = document.getElementById('screen-returns');
+  el.innerHTML = `<div class="screen-header"><h2>Returns & Replacements</h2><p>Loading…</p></div><div style="text-align:center;padding:60px"><div class="loader"></div></div>`;
+  try {
+    const f = S.returns.filters;
+    const qs = new URLSearchParams();
+    if (f.status) qs.set('status', f.status);
+    if (f.return_from) qs.set('return_from', f.return_from);
+    if (f.search) qs.set('search', f.search);
+    const data = await api('GET', '/api/returns?' + qs.toString());
+    S.returns.list = data.returns;
+    S.returns.stats = data.stats;
+    _renderReturnsList(data);
+  } catch (err) {
+    el.innerHTML = `<div class="screen-header"><h2>Returns & Replacements</h2></div><div class="alert alert-error">${esc(err.message)}</div>`;
+  }
+}
+
+function _renderReturnsList(data) {
+  const el = document.getElementById('screen-returns');
+  const { returns, stats } = data;
+  const f = S.returns.filters;
+
+  const statCards = Object.entries(RETURN_STATUS_MAP).map(([key, s]) => {
+    const cnt = stats[key] || 0;
+    return `<div class="stat-card" style="border-left-color:${s.color};cursor:pointer" onclick="returnsFilterStatus('${key}')">
+      <div class="stat-label">${s.label}</div>
+      <div class="stat-value" style="color:${s.color}">${cnt}</div>
+    </div>`;
+  }).join('');
+
+  const tableRows = returns.length ? returns.map(r => `
+    <tr onclick="openReturnDetail(${r.id})" style="cursor:pointer">
+      <td style="font-weight:600;color:var(--blue)">#${r.id}</td>
+      <td>${returnStatusBadge(r.status)}</td>
+      <td>${esc(r.return_from || '—')}</td>
+      <td><span style="font-weight:600">${esc(r.order_id || '—')}</span></td>
+      <td><span style="font-family:monospace;font-size:12px;color:var(--txt)">${esc(r.sku || '—')}</span></td>
+      <td>${esc(r.customer_name || '—')}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.device_config_sent || '')}">${esc(r.device_config_sent || '—')}</td>
+      <td>${esc(r.return_reason || '—')}</td>
+      <td>${returnGradeBadge(r.grade)}</td>
+      <td>${esc(r.final_action || '—')}</td>
+      <td style="color:var(--muted);font-size:12px">${fmtDateShort(r.return_date)}</td>
+    </tr>`).join('') : `<tr><td colspan="10"><div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 10h10a8 8 0 018 8v2M3 10l6 6M3 10l6-6"/></svg><p>No returns found</p></div></td></tr>`;
+
+  el.innerHTML = `
+  <div class="screen-header" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div><h2>Returns &amp; Replacements</h2><p style="color:var(--muted);font-size:13px;margin-top:3px">${data.total} total return${data.total !== 1 ? 's' : ''}</p></div>
+    <button class="btn btn-primary" onclick="openReturnIntakeModal()">
+      <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New Return
+    </button>
+  </div>
+
+  <div class="stats-grid" style="grid-template-columns:repeat(5,1fr)">${statCards}</div>
+
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input type="text" class="search-input" placeholder="Search order ID, customer, device…" value="${esc(f.search)}" oninput="S.returns.filters.search=this.value" onkeydown="if(event.key==='Enter')renderReturns()" style="width:260px">
+      <select onchange="S.returns.filters.return_from=this.value;renderReturns()">
+        <option value="">All Marketplaces</option>
+        ${RETURN_FROM_OPTIONS.map(o => `<option value="${esc(o)}" ${f.return_from===o?'selected':''}>${esc(o)}</option>`).join('')}
+      </select>
+      <select onchange="S.returns.filters.status=this.value;renderReturns()">
+        <option value="">All Statuses</option>
+        ${Object.entries(RETURN_STATUS_MAP).map(([k,s]) => `<option value="${k}" ${f.status===k?'selected':''}>${s.label}</option>`).join('')}
+      </select>
+    </div>
+    <div class="toolbar-right">
+      <button class="btn btn-outline btn-sm" onclick="S.returns.filters={status:'',return_from:'',search:''};renderReturns()">Clear</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Status</th><th>From</th><th>Order ID</th><th>SKU</th><th>Customer</th>
+        <th>Device Sent</th><th>Return Reason</th><th>Grade</th><th>Final Action</th><th>Return Date</th>
+      </tr></thead>
+      <tbody>${tableRows}</tbody>
+    </table>
+    <div class="table-foot"><span>${returns.length} records</span></div>
+  </div>`;
+}
+
+function returnsFilterStatus(status) {
+  S.returns.filters.status = S.returns.filters.status === status ? '' : status;
+  renderReturns();
+}
+
+// ─── Intake Modal ─────────────────────────────────────────────────────────────
+function openReturnIntakeModal(prefill = {}) {
+  const today = new Date().toISOString().split('T')[0];
+  openModal(`
+  <div class="modal-header">
+    <h3>📦 New Return — Intake</h3>
+    <button class="modal-close" onclick="closeModal()">✕</button>
+  </div>
+  <div class="modal-body">
+    <div class="form-section">
+      <div class="form-section-title">Order Information</div>
+      <div class="form-grid form-grid-3" style="gap:14px">
+        <div class="form-group">
+          <label>Return From *</label>
+          <select id="ri-return_from">
+            <option value="">— Select Marketplace —</option>
+            ${RETURN_FROM_OPTIONS.map(o => `<option value="${esc(o)}" ${prefill.return_from===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Order ID</label>
+          <input type="text" id="ri-order_id" value="${esc(prefill.order_id||'')}" placeholder="e.g. BM-123456">
+        </div>
+        <div class="form-group">
+          <label>Return Date</label>
+          <input type="date" id="ri-return_date" value="${prefill.return_date||today}">
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:14px">
+        <label>SKU <span style="color:var(--red);font-weight:700">*</span> <span style="font-weight:400;color:var(--muted);text-transform:none;font-size:11px">— primary identifier for this return</span></label>
+        <input type="text" id="ri-sku" value="${esc(prefill.sku||'')}" placeholder="e.g. iphone-14-pro-256gb-SG-A" style="font-family:monospace">
+      </div>
+      <div class="form-grid form-grid-2" style="gap:14px;margin-top:14px">
+        <div class="form-group">
+          <label>Customer Name</label>
+          <input type="text" id="ri-customer_name" value="${esc(prefill.customer_name||'')}" placeholder="Full name">
+        </div>
+        <div class="form-group">
+          <label>Tracking Number</label>
+          <input type="text" id="ri-tracking_number" value="${esc(prefill.tracking_number||'')}" placeholder="Return tracking #">
+        </div>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <div class="form-section-title">Device & Return Reason</div>
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Device Config Sent (what we shipped)</label>
+        <input type="text" id="ri-device_config_sent" value="${esc(prefill.device_config_sent||'')}" placeholder="e.g. iPhone 14 Pro 256GB Space Black">
+      </div>
+      <div class="form-grid form-grid-2" style="gap:14px">
+        <div class="form-group">
+          <label>Return Reason</label>
+          <select id="ri-return_reason">
+            <option value="">— Select Reason —</option>
+            ${RETURN_REASON_OPTIONS.map(o => `<option value="${esc(o)}" ${prefill.return_reason===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Initial Status</label>
+          <select id="ri-status">
+            <option value="awaiting_shipment" ${(!prefill.status||prefill.status==='awaiting_shipment')?'selected':''}>Awaiting Shipment</option>
+            <option value="received" ${prefill.status==='received'?'selected':''}>Received</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:14px">
+        <label>Customer Complaint / Need</label>
+        <textarea id="ri-customer_complaint" rows="3" placeholder="What the customer reported…">${esc(prefill.customer_complaint||'')}</textarea>
+      </div>
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+    <button class="btn btn-primary" onclick="saveReturnIntake(${prefill.id||0})">
+      ${prefill.id ? 'Save Changes' : 'Create Return'}
+    </button>
+  </div>`);
+}
+
+async function saveReturnIntake(id = 0) {
+  const body = {
+    return_from: document.getElementById('ri-return_from').value,
+    order_id: document.getElementById('ri-order_id').value.trim(),
+    sku: document.getElementById('ri-sku').value.trim(),
+    return_date: document.getElementById('ri-return_date').value,
+    customer_name: document.getElementById('ri-customer_name').value.trim(),
+    tracking_number: document.getElementById('ri-tracking_number').value.trim(),
+    device_config_sent: document.getElementById('ri-device_config_sent').value.trim(),
+    return_reason: document.getElementById('ri-return_reason').value,
+    customer_complaint: document.getElementById('ri-customer_complaint').value.trim(),
+    status: document.getElementById('ri-status').value,
+  };
+  if (!body.return_from) { alert('Please select a marketplace.'); return; }
+  if (!body.sku) { alert('SKU is required — it is the primary identifier for this return.'); return; }
+  try {
+    if (id) {
+      // preserve other fields
+      const existing = S.returns.list.find(r => r.id === id) || {};
+      await api('PUT', '/api/returns/' + id, { ...existing, ...body });
+    } else {
+      await api('POST', '/api/returns', body);
+    }
+    closeModal();
+    showToast(id ? 'Return updated.' : 'Return created!');
+    renderReturns();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── Detail / Full Edit Modal ─────────────────────────────────────────────────
+async function openReturnDetail(id) {
+  let r;
+  try { r = await api('GET', '/api/returns/' + id); } catch (err) { alert(err.message); return; }
+
+  const statusOpts = Object.entries(RETURN_STATUS_MAP).map(([k,s]) =>
+    `<option value="${k}" ${r.status===k?'selected':''}>${s.label}</option>`).join('');
+
+  const testField = (id, label, val) => `
+    <div class="test-item">
+      <label>${label}</label>
+      <select id="${id}">
+        <option value="Not Tested" ${(!val||val==='Not Tested')?'selected':''}>Not Tested</option>
+        <option value="Pass" ${val==='Pass'?'selected':''}>Pass</option>
+        <option value="Fail" ${val==='Fail'?'selected':''}>Fail</option>
+        <option value="N/A" ${val==='N/A'?'selected':''}>N/A</option>
+      </select>
+    </div>`;
+
+  openModal(`
+  <div class="modal-header">
+    <h3>Return #${r.id} — ${esc(r.order_id||'No Order ID')}</h3>
+    <button class="modal-close" onclick="closeModal()">✕</button>
+  </div>
+  <div class="modal-body" style="font-size:13px">
+
+    <!-- Status bar -->
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:#f8fafc;border-radius:8px;margin-bottom:20px;flex-wrap:wrap">
+      <span style="font-weight:600;color:var(--muted);font-size:12px">STATUS:</span>
+      <select id="rd-status" style="font-weight:600;border:none;background:transparent;font-size:13px;cursor:pointer;outline:none">${statusOpts}</select>
+      <span style="margin-left:auto;color:var(--muted);font-size:11px">Created ${fmtDateShort(r.created_at?.split('T')[0]||'')} by ${esc(r.created_by||'—')}</span>
+    </div>
+
+    <!-- Section 1: Intake Info -->
+    <div class="form-section">
+      <div class="form-section-title">📦 Intake Information</div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label>SKU <span style="color:var(--red)">*</span></label>
+        <input type="text" id="rd-sku" value="${esc(r.sku||'')}" placeholder="e.g. iphone-14-pro-256gb-SG-A" style="font-family:monospace;font-weight:600">
+      </div>
+      <div class="form-grid form-grid-3" style="gap:12px">
+        <div class="form-group">
+          <label>Return From</label>
+          <select id="rd-return_from">
+            <option value="">—</option>
+            ${RETURN_FROM_OPTIONS.map(o => `<option value="${esc(o)}" ${r.return_from===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Order ID</label>
+          <input type="text" id="rd-order_id" value="${esc(r.order_id||'')}">
+        </div>
+        <div class="form-group">
+          <label>Return Date</label>
+          <input type="date" id="rd-return_date" value="${r.return_date?r.return_date.split('T')[0]:''}">
+        </div>
+        <div class="form-group">
+          <label>Customer Name</label>
+          <input type="text" id="rd-customer_name" value="${esc(r.customer_name||'')}">
+        </div>
+        <div class="form-group">
+          <label>Tracking Number</label>
+          <input type="text" id="rd-tracking_number" value="${esc(r.tracking_number||'')}">
+        </div>
+        <div class="form-group">
+          <label>Return Reason</label>
+          <select id="rd-return_reason">
+            <option value="">—</option>
+            ${RETURN_REASON_OPTIONS.map(o => `<option value="${esc(o)}" ${r.return_reason===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label>Device Config Sent</label>
+        <input type="text" id="rd-device_config_sent" value="${esc(r.device_config_sent||'')}" placeholder="What we originally shipped">
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label>Customer Complaint / Need</label>
+        <textarea id="rd-customer_complaint" rows="2">${esc(r.customer_complaint||'')}</textarea>
+      </div>
+    </div>
+
+    <!-- Section 2: Received / Testing -->
+    <div class="form-section">
+      <div class="form-section-title">🔬 Received &amp; Testing</div>
+      <div class="form-grid form-grid-3" style="gap:12px;margin-bottom:12px">
+        <div class="form-group">
+          <label>Received Date</label>
+          <input type="date" id="rd-received_date" value="${r.received_date?r.received_date.split('T')[0]:''}">
+        </div>
+        <div class="form-group">
+          <label>Condition Received</label>
+          <select id="rd-condition_received">
+            <option value="">—</option>
+            ${CONDITION_OPTIONS.map(o => `<option value="${esc(o)}" ${r.condition_received===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Charger Included</label>
+          <select id="rd-charger_included">
+            <option value="">—</option>
+            <option value="Yes" ${r.charger_included==='Yes'?'selected':''}>Yes</option>
+            <option value="No" ${r.charger_included==='No'?'selected':''}>No</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px">
+        <label>Device Config Received (what came back)</label>
+        <input type="text" id="rd-device_config_received" value="${esc(r.device_config_received||'')}" placeholder="What was actually returned">
+      </div>
+
+      <div style="font-size:11px;font-weight:700;color:var(--blue);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Hardware Tests</div>
+      <div class="test-grid">
+        ${testField('rd-lcd_test','LCD Display', r.lcd_test)}
+        ${testField('rd-touch_test','Touch / Digitizer', r.touch_test)}
+        ${testField('rd-face_id_test','Face ID', r.face_id_test)}
+        ${testField('rd-fingerprint_test','Fingerprint', r.fingerprint_test)}
+        ${testField('rd-front_camera_test','Front Camera', r.front_camera_test)}
+        ${testField('rd-rear_camera_test','Rear Camera', r.rear_camera_test)}
+        ${testField('rd-speaker_test','Speaker', r.speaker_test)}
+        ${testField('rd-mic_test','Microphone', r.mic_test)}
+        ${testField('rd-wifi_test','Wi-Fi', r.wifi_test)}
+        ${testField('rd-cellular_test','Cellular', r.cellular_test)}
+        ${testField('rd-charging_test','Charging', r.charging_test)}
+        <div class="test-item">
+          <label>Battery Health %</label>
+          <input type="number" id="rd-battery_health" value="${r.battery_health||''}" min="0" max="100" placeholder="e.g. 87" style="width:100%;padding:6px 8px;font-size:13px">
+        </div>
+      </div>
+      <div class="form-grid form-grid-3" style="gap:12px;margin-top:12px">
+        <div class="form-group">
+          <label>Grade</label>
+          <select id="rd-grade">
+            <option value="">—</option>
+            <option value="A" ${r.grade==='A'?'selected':''}>A — Like New</option>
+            <option value="B" ${r.grade==='B'?'selected':''}>B — Good</option>
+            <option value="C" ${r.grade==='C'?'selected':''}>C — Fair</option>
+            <option value="D" ${r.grade==='D'?'selected':''}>D — Poor</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Tested By</label>
+          <input type="text" id="rd-tested_by" value="${esc(r.tested_by||'')}">
+        </div>
+        <div class="form-group">
+          <label>Test Date</label>
+          <input type="date" id="rd-test_date" value="${r.test_date?r.test_date.split('T')[0]:''}">
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label>Technician Notes</label>
+        <textarea id="rd-tech_notes" rows="2">${esc(r.tech_notes||'')}</textarea>
+      </div>
+    </div>
+
+    <!-- Section 2b: Media / Evidence -->
+    <div class="form-section">
+      <div class="form-section-title">📷 Photos &amp; Videos — Evidence</div>
+      <div id="media-gallery-${r.id}" style="min-height:60px">
+        <div style="text-align:center;padding:16px"><div class="loader"></div></div>
+      </div>
+      <div class="media-dropzone" id="media-dropzone-${r.id}" style="margin-top:12px"
+           ondragover="event.preventDefault();this.classList.add('drag-over')"
+           ondragleave="this.classList.remove('drag-over')"
+           ondrop="handleMediaDrop(event,${r.id})">
+        <input type="file" id="media-input-${r.id}" multiple accept="image/*,video/*"
+               onchange="uploadReturnMedia(${r.id},this.files)">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+        </svg>
+        <p><strong>Click to upload</strong> or drag &amp; drop</p>
+        <div class="dz-hint">Photos (JPG, PNG, HEIC) and Videos (MP4, MOV) • Max 200MB per file</div>
+      </div>
+      <div class="media-upload-progress" id="media-progress-${r.id}">⏳ Uploading…</div>
+    </div>
+
+    <!-- Section 3: Ops Decision -->
+    <div class="form-section">
+      <div class="form-section-title">✅ Ops Decision</div>
+      <div class="form-grid form-grid-3" style="gap:12px">
+        <div class="form-group">
+          <label>Next Action Item</label>
+          <select id="rd-next_action">
+            <option value="">—</option>
+            ${NEXT_ACTION_OPTIONS.map(o => `<option value="${esc(o)}" ${r.next_action===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Status — Ops</label>
+          <select id="rd-ops_status">
+            <option value="">—</option>
+            <option value="Yes" ${r.ops_status==='Yes'?'selected':''}>Yes</option>
+            <option value="No" ${r.ops_status==='No'?'selected':''}>No</option>
+            <option value="N/A" ${r.ops_status==='N/A'?'selected':''}>N/A</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Status — Warehouse</label>
+          <select id="rd-warehouse_status">
+            <option value="">—</option>
+            <option value="Yes" ${r.warehouse_status==='Yes'?'selected':''}>Yes</option>
+            <option value="No" ${r.warehouse_status==='No'?'selected':''}>No</option>
+            <option value="N/A" ${r.warehouse_status==='N/A'?'selected':''}>N/A</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Resell / Action</label>
+          <select id="rd-resell_action">
+            <option value="">—</option>
+            ${RESELL_ACTION_OPTIONS.map(o => `<option value="${esc(o)}" ${r.resell_action===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Final Action</label>
+          <select id="rd-final_action">
+            <option value="">—</option>
+            ${FINAL_ACTION_OPTIONS.map(o => `<option value="${esc(o)}" ${r.final_action===o?'selected':''}>${esc(o)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Ops Review Date</label>
+          <input type="date" id="rd-ops_review_date" value="${r.ops_review_date?r.ops_review_date.split('T')[0]:''}">
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <label>Ops Notes</label>
+        <textarea id="rd-ops_notes" rows="2">${esc(r.ops_notes||'')}</textarea>
+      </div>
+    </div>
+  </div>
+  <div class="modal-footer" style="justify-content:space-between">
+    <button class="btn btn-danger btn-sm admin-only" onclick="deleteReturn(${r.id})">Delete</button>
+    <div style="display:flex;gap:10px">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveReturnDetail(${r.id})">Save Changes</button>
+    </div>
+  </div>`);
+
+  // show/hide delete based on role
+  document.querySelectorAll('#modal-box .admin-only').forEach(el => {
+    el.style.display = (S.user?.role === 'admin') ? '' : 'none';
+  });
+
+  // Load media gallery
+  loadReturnMedia(r.id);
+}
+
+async function saveReturnDetail(id) {
+  const g = id => document.getElementById(id)?.value || null;
+  const body = {
+    status: g('rd-status'),
+    return_from: g('rd-return_from'),
+    order_id: document.getElementById('rd-order_id').value.trim() || null,
+    sku: document.getElementById('rd-sku').value.trim() || null,
+    return_date: g('rd-return_date'),
+    customer_name: document.getElementById('rd-customer_name').value.trim() || null,
+    tracking_number: document.getElementById('rd-tracking_number').value.trim() || null,
+    return_reason: g('rd-return_reason'),
+    customer_complaint: document.getElementById('rd-customer_complaint').value.trim() || null,
+    device_config_sent: document.getElementById('rd-device_config_sent').value.trim() || null,
+    received_date: g('rd-received_date'),
+    device_config_received: document.getElementById('rd-device_config_received').value.trim() || null,
+    condition_received: g('rd-condition_received'),
+    charger_included: g('rd-charger_included'),
+    lcd_test: g('rd-lcd_test') || 'Not Tested',
+    touch_test: g('rd-touch_test') || 'Not Tested',
+    battery_health: document.getElementById('rd-battery_health').value || null,
+    face_id_test: g('rd-face_id_test') || 'Not Tested',
+    fingerprint_test: g('rd-fingerprint_test') || 'Not Tested',
+    front_camera_test: g('rd-front_camera_test') || 'Not Tested',
+    rear_camera_test: g('rd-rear_camera_test') || 'Not Tested',
+    speaker_test: g('rd-speaker_test') || 'Not Tested',
+    mic_test: g('rd-mic_test') || 'Not Tested',
+    wifi_test: g('rd-wifi_test') || 'Not Tested',
+    cellular_test: g('rd-cellular_test') || 'Not Tested',
+    charging_test: g('rd-charging_test') || 'Not Tested',
+    grade: g('rd-grade'),
+    tech_notes: document.getElementById('rd-tech_notes').value.trim() || null,
+    tested_by: document.getElementById('rd-tested_by').value.trim() || null,
+    test_date: g('rd-test_date'),
+    next_action: g('rd-next_action'),
+    ops_status: g('rd-ops_status'),
+    warehouse_status: g('rd-warehouse_status'),
+    resell_action: g('rd-resell_action'),
+    final_action: g('rd-final_action'),
+    ops_review_date: g('rd-ops_review_date'),
+    ops_notes: document.getElementById('rd-ops_notes').value.trim() || null,
+    ops_reviewed_by: S.user?.username || null,
+  };
+  try {
+    await api('PUT', '/api/returns/' + id, body);
+    closeModal();
+    showToast('Return saved!');
+    renderReturns();
+  } catch (err) { alert(err.message); }
+}
+
+async function deleteReturn(id) {
+  if (!confirm('Delete this return? This cannot be undone.')) return;
+  try {
+    await api('DELETE', '/api/returns/' + id);
+    closeModal();
+    showToast('Return deleted.');
+    renderReturns();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── RETURN MEDIA ──────────────────────────────────────────────────────────────
+
+function fmtFileSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function isVideo(mimetype) {
+  return mimetype && mimetype.startsWith('video/');
+}
+
+async function loadReturnMedia(returnId) {
+  const gallery = document.getElementById('media-gallery-' + returnId);
+  if (!gallery) return;
+  try {
+    const files = await api('GET', '/api/returns/' + returnId + '/media');
+    renderMediaGallery(returnId, files);
+  } catch (err) {
+    gallery.innerHTML = `<p style="color:var(--muted);font-size:12px;text-align:center">Could not load media: ${esc(err.message)}</p>`;
+  }
+}
+
+function renderMediaGallery(returnId, files) {
+  const gallery = document.getElementById('media-gallery-' + returnId);
+  if (!gallery) return;
+
+  if (!files || files.length === 0) {
+    gallery.innerHTML = `<p style="color:var(--muted);font-size:12px;text-align:center;padding:12px 0">No photos or videos uploaded yet. Use the upload area below.</p>`;
+    return;
+  }
+
+  const thumbs = files.map(f => {
+    const url = '/uploads/returns/' + f.filename;
+    const isVid = isVideo(f.mimetype);
+    const thumb = isVid
+      ? `<div class="vid-thumb" onclick="openLightbox('${url}','${esc(f.original_name||f.filename)}','${esc(f.caption||'')}',true)">
+           <svg fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+         </div>`
+      : `<img src="${url}" alt="${esc(f.original_name||f.filename)}" loading="lazy"
+             onclick="openLightbox('${url}','${esc(f.original_name||f.filename)}','${esc(f.caption||'')}',false)">`;
+
+    const canDelete = (S.user?.username === f.uploaded_by || S.user?.role === 'admin');
+    return `
+      <div class="media-thumb" id="media-file-${f.id}">
+        ${thumb}
+        <div class="media-actions">
+          ${canDelete ? `<button class="media-del-btn" onclick="deleteReturnMedia(${f.id},${returnId})" title="Delete">✕</button>` : ''}
+        </div>
+        <div class="media-thumb-info">
+          <div class="media-thumb-name" title="${esc(f.original_name||f.filename)}">${esc(f.original_name||f.filename)}</div>
+          <div class="media-thumb-meta">${fmtFileSize(f.size)} · ${esc(f.uploaded_by||'')}</div>
+        </div>
+        ${f.caption ? `<div class="media-caption" title="${esc(f.caption)}">${esc(f.caption)}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  gallery.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <span style="font-size:12px;color:var(--muted);font-weight:600">${files.length} file${files.length!==1?'s':''} uploaded</span>
+    </div>
+    <div class="media-grid">${thumbs}</div>`;
+}
+
+async function uploadReturnMedia(returnId, files) {
+  if (!files || files.length === 0) return;
+  const progress = document.getElementById('media-progress-' + returnId);
+  const dropzone = document.getElementById('media-dropzone-' + returnId);
+  if (progress) { progress.style.display = 'block'; progress.textContent = `⏳ Uploading ${files.length} file${files.length>1?'s':''}…`; }
+  if (dropzone) dropzone.style.opacity = '0.5';
+
+  try {
+    const formData = new FormData();
+    for (const f of files) formData.append('files', f);
+
+    const opts = { method: 'POST', headers: {} };
+    if (S.token) opts.headers['Authorization'] = 'Bearer ' + S.token;
+    opts.body = formData;
+
+    const r = await fetch('/api/returns/' + returnId + '/media', opts);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Upload failed');
+
+    if (progress) { progress.textContent = `✅ ${data.uploaded} file${data.uploaded>1?'s':''} uploaded!`; setTimeout(() => { progress.style.display = 'none'; }, 3000); }
+    showToast(`${data.uploaded} file${data.uploaded>1?'s':''} uploaded!`);
+    // Reset file input
+    const inp = document.getElementById('media-input-' + returnId);
+    if (inp) inp.value = '';
+    loadReturnMedia(returnId);
+  } catch (err) {
+    if (progress) { progress.textContent = `❌ Upload failed: ${err.message}`; progress.style.background = '#fef2f2'; progress.style.color = 'var(--red)'; setTimeout(() => { progress.style.display='none'; progress.style.background=''; progress.style.color=''; }, 4000); }
+    showToast(err.message, 'error');
+  } finally {
+    if (dropzone) dropzone.style.opacity = '1';
+  }
+}
+
+function handleMediaDrop(event, returnId) {
+  event.preventDefault();
+  const dropzone = document.getElementById('media-dropzone-' + returnId);
+  if (dropzone) dropzone.classList.remove('drag-over');
+  const files = event.dataTransfer.files;
+  if (files.length) uploadReturnMedia(returnId, files);
+}
+
+async function deleteReturnMedia(mediaId, returnId) {
+  if (!confirm('Delete this file? This cannot be undone.')) return;
+  try {
+    await api('DELETE', '/api/returns/media/' + mediaId);
+    const el = document.getElementById('media-file-' + mediaId);
+    if (el) el.remove();
+    // refresh count
+    loadReturnMedia(returnId);
+    showToast('File deleted.');
+  } catch (err) { alert(err.message); }
+}
+
+// ─── Lightbox ─────────────────────────────────────────────────────────────────
+function openLightbox(url, name, caption, isVid) {
+  const lb = document.getElementById('lightbox');
+  const content = document.getElementById('lightbox-content');
+  const capEl = document.getElementById('lightbox-caption');
+  if (!lb || !content) return;
+
+  if (isVid) {
+    content.innerHTML = `<video src="${url}" controls autoplay style="max-width:92vw;max-height:88vh;border-radius:8px;outline:none" onclick="event.stopPropagation()"></video>`;
+  } else {
+    content.innerHTML = `<img src="${url}" alt="${esc(name)}" style="max-width:92vw;max-height:88vh;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.5)" onclick="event.stopPropagation()">`;
+  }
+
+  if (caption) { capEl.textContent = caption; capEl.style.display = ''; }
+  else capEl.style.display = 'none';
+
+  lb.style.display = 'flex';
+  document.addEventListener('keydown', _lightboxKeyHandler);
+}
+
+function closeLightbox() {
+  const lb = document.getElementById('lightbox');
+  if (!lb) return;
+  lb.style.display = 'none';
+  const content = document.getElementById('lightbox-content');
+  if (content) content.innerHTML = '';
+  document.removeEventListener('keydown', _lightboxKeyHandler);
+}
+
+function _lightboxKeyHandler(e) {
+  if (e.key === 'Escape') closeLightbox();
+}
+
+// ─── Parts Requisition ────────────────────────────────────────────────────────
+
+// Device brands used in parts requisition (granular, not just Apple/Samsung)
+const PARTS_DEVICE_BRANDS = [
+  'iPhone','iPad','iPad Mini','iPad Air','iPad Pro',
+  'MacBook Air','MacBook Pro','Samsung','Google','Other'
+];
+
+// Return models from catalog for a given device brand
+function reqModelsForBrand(brand) {
+  const builtIn = DEVICE_CATALOG.models || {};
+  const custom  = S.catalog?.models || {};
+
+  // Merge + deduplicate helper
+  const merge = (...keys) => {
+    const all = [];
+    keys.forEach(k => {
+      (builtIn[k] || []).forEach(m => { if (!all.includes(m)) all.push(m); });
+      (custom[k]  || []).forEach(m => { if (!all.includes(m)) all.push(m); });
+    });
+    return all.sort();
+  };
+
+  const apple   = merge('Apple');
+  const samsung = merge('Samsung');
+  const google  = merge('Google');
+
+  switch (brand) {
+    case 'iPhone':
+      return apple.filter(m => /iphone/i.test(m));
+    case 'iPad':
+      return apple.filter(m => /^ipad\s*(\(|\d)/i.test(m) && !/mini|air|pro/i.test(m));
+    case 'iPad Mini':
+      return apple.filter(m => /ipad mini/i.test(m));
+    case 'iPad Air':
+      return apple.filter(m => /ipad air/i.test(m));
+    case 'iPad Pro':
+      return apple.filter(m => /ipad pro/i.test(m));
+    case 'MacBook Air':
+      return apple.filter(m => /macbook air/i.test(m));
+    case 'MacBook Pro':
+      return apple.filter(m => /macbook pro/i.test(m));
+    case 'Samsung':
+      return samsung;
+    case 'Google':
+      return google;
+    default:
+      return [];
+  }
+}
+
+// Detect brand from a model string (for prefilling when editing)
+function detectBrandFromModel(model) {
+  if (!model) return '';
+  const m = model.toLowerCase();
+  if (/iphone/.test(m))       return 'iPhone';
+  if (/ipad pro/.test(m))     return 'iPad Pro';
+  if (/ipad air/.test(m))     return 'iPad Air';
+  if (/ipad mini/.test(m))    return 'iPad Mini';
+  if (/^ipad/.test(m))        return 'iPad';
+  if (/macbook air/.test(m))  return 'MacBook Air';
+  if (/macbook pro/.test(m))  return 'MacBook Pro';
+  if (/galaxy|samsung/.test(m)) return 'Samsung';
+  if (/pixel/.test(m))        return 'Google';
+  return 'Other';
+}
+
+const PART_TYPES = [
+  { code: 'BTRY', label: 'Battery',              colorNA: true  },
+  { code: 'SCRN', label: 'Screen (LCD+Touch)',    colorNA: false },
+  { code: 'DIGI', label: 'Digitizer (Touch Only)',colorNA: false },
+  { code: 'HOUS', label: 'Housing / Back Cover',  colorNA: false },
+  { code: 'CAMR', label: 'Camera',                colorNA: false },
+  { code: 'SPKR', label: 'Speaker',               colorNA: true  },
+  { code: 'CHRG', label: 'Charging Port',         colorNA: true  },
+  { code: 'OTHR', label: 'Other',                 colorNA: false },
+];
+
+const PART_CATEGORIES = [
+  'iPhone Parts','iPad Parts','iPad Pro Parts','iPad Air Parts',
+  'MacBook Air Parts','MacBook Pro Parts','Samsung Parts','Other Parts'
+];
+
+const REQ_STATUSES = ['Requested','Approved','Converted to PO','Rejected','Cancelled'];
+
+const WAREHOUSE_LOCATIONS = ['Milpitas 741','San Jose 100','Fremont 200','Remote'];
+
+const REQ_STATUS_STYLE = {
+  'Requested':       { bg:'#fffbeb', color:'#d97706' },
+  'Approved':        { bg:'#eff6ff', color:'#2563eb' },
+  'Converted to PO': { bg:'#f0fdf4', color:'#16a34a' },
+  'Rejected':        { bg:'#fef2f2', color:'#dc2626' },
+  'Cancelled':       { bg:'#f1f5f9', color:'#64748b' },
+};
+
+function reqStatusBadge(s) {
+  const st = REQ_STATUS_STYLE[s] || { bg:'#f1f5f9', color:'#64748b' };
+  return `<span class="badge" style="background:${st.bg};color:${st.color}">${esc(s||'Requested')}</span>`;
+}
+
+function reqPriorityBadge(p) {
+  if (p === 'Urgent') return `<span class="badge" style="background:#fef2f2;color:#dc2626">Urgent</span>`;
+  return `<span class="badge" style="background:#f1f5f9;color:#64748b">Normal</span>`;
+}
+
+function inferPartCategory(model) {
+  if (!model) return '';
+  const m = model.toLowerCase();
+  if (m.includes('ipad pro'))  return 'iPad Pro Parts';
+  if (m.includes('ipad air'))  return 'iPad Air Parts';
+  if (m.includes('ipad'))      return 'iPad Parts';
+  if (m.includes('iphone'))    return 'iPhone Parts';
+  if (m.includes('macbook air'))  return 'MacBook Air Parts';
+  if (m.includes('macbook pro'))  return 'MacBook Pro Parts';
+  if (m.includes('macbook'))   return 'MacBook Air Parts';
+  if (m.includes('galaxy') || m.includes('samsung')) return 'Samsung Parts';
+  return 'Other Parts';
+}
+
+function buildSku(typeCode, model, color, quality) {
+  const t = typeCode || 'OTHR';
+  const m = model || 'Unknown';
+  const c = color || 'NA';
+  const q = quality || 'OEM';
+  return `${t}-${m}-${c}-${q}`;
+}
+
+function allCatalogModels() {
+  if (!S.catalog || !S.catalog.models) return [];
+  const groups = [];
+  for (const [brand, models] of Object.entries(S.catalog.models)) {
+    if (Array.isArray(models) && models.length) groups.push({ brand, models });
+  }
+  return groups;
+}
+
+function catalogModelOptions(selectedModel) {
+  const groups = allCatalogModels();
+  if (!groups.length) return `<option value="">— No models in catalog —</option>`;
+  return groups.map(g =>
+    `<optgroup label="${esc(g.brand)}">${g.models.map(m =>
+      `<option value="${esc(m)}" ${m === selectedModel ? 'selected' : ''}>${esc(m)}</option>`
+    ).join('')}</optgroup>`
+  ).join('');
+}
+
+// ─── Render screen ────────────────────────────────────────────────────────────
+async function renderRequisitions() {
+  const el = document.getElementById('screen-requisitions');
+  el.innerHTML = `<div class="screen-header"><h2>Parts Requisitions</h2><p style="color:var(--muted)">Loading…</p></div><div style="text-align:center;padding:60px"><div class="loader"></div></div>`;
+  try {
+    const f = S.requisitions.filters;
+    const qs = new URLSearchParams();
+    if (f.status)       qs.set('status', f.status);
+    if (f.priority)     qs.set('priority', f.priority);
+    if (f.part_category) qs.set('part_category', f.part_category);
+    if (f.search)       qs.set('search', f.search);
+    const data = await api('GET', '/api/requisitions?' + qs.toString());
+    S.requisitions.list  = data.requisitions;
+    S.requisitions.stats = data.stats;
+    _renderRequisitionsList(data);
+  } catch (err) {
+    el.innerHTML = `<div class="screen-header"><h2>Parts Requisitions</h2></div><div class="alert alert-error">${esc(err.message)}</div>`;
+  }
+}
+
+function _renderRequisitionsList(data) {
+  const el = document.getElementById('screen-requisitions');
+  const { requisitions, stats, total } = data;
+  const f = S.requisitions.filters;
+
+  const statDefs = [
+    { key: null,              label: 'Total',          color: 'var(--blue)',  value: total },
+    { key: 'Requested',       label: 'Requested',      color: '#d97706',      value: stats['Requested'] || 0 },
+    { key: 'Approved',        label: 'Approved',       color: '#2563eb',      value: stats['Approved'] || 0 },
+    { key: 'Converted to PO', label: 'Converted to PO',color: '#16a34a',     value: stats['Converted to PO'] || 0 },
+    { key: 'Rejected',        label: 'Rejected',       color: '#dc2626',      value: stats['Rejected'] || 0 },
+  ];
+
+  const statCards = statDefs.map(d => `
+    <div class="stat-card" style="border-left-color:${d.color};cursor:pointer" onclick="${d.key ? `S.requisitions.filters.status='${d.key}';renderRequisitions()` : `S.requisitions.filters.status='';renderRequisitions()`}">
+      <div class="stat-label">${d.label}</div>
+      <div class="stat-value" style="color:${d.color}">${d.value}</div>
+    </div>`).join('');
+
+  const rows = requisitions.length ? requisitions.map(r => `
+    <tr onclick="openRequisitionDetail(${r.id})" style="cursor:pointer">
+      <td style="font-weight:600;color:var(--blue)">#${r.id}</td>
+      <td>${reqStatusBadge(r.status)}</td>
+      <td>${reqPriorityBadge(r.priority)}</td>
+      <td class="mono" style="color:var(--blue)">${esc(r.part_sku || '—')}</td>
+      <td>${esc(r.model_compatibility || '—')}</td>
+      <td>${esc(r.part_category || '—')}</td>
+      <td style="text-align:center;font-weight:600">${r.quantity_needed ?? '—'}</td>
+      <td style="text-align:center;color:var(--muted)">${r.actual_ordered != null ? r.actual_ordered : '—'}</td>
+      <td>${esc(r.requested_by || '—')}</td>
+      <td style="color:var(--muted);font-size:12px">${r.request_date ? r.request_date.slice(0,10) : '—'}</td>
+      <td style="display:flex;gap:6px;align-items:center">
+        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openRequisitionDetail(${r.id})">Edit</button>
+        ${r.status === 'Approved' ? `<button class="btn btn-sm" style="background:#7c3aed;color:#fff" onclick="event.stopPropagation();convertReqToPO(${r.id})">→ PO</button>` : ''}
+      </td>
+    </tr>`).join('')
+    : `<tr><td colspan="11"><div class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="12" y2="16"/></svg>
+        <p>No requisitions found</p></div></td></tr>`;
+
+  el.innerHTML = `
+  <div class="screen-header" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div><h2>Parts Requisitions</h2><p style="color:var(--muted);font-size:13px;margin-top:3px">${total} total requisition${total !== 1 ? 's' : ''}</p></div>
+    <button class="btn btn-primary" onclick="openRequisitionModal()">
+      <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New Request
+    </button>
+  </div>
+
+  <div class="stats-grid" style="grid-template-columns:repeat(5,1fr)">${statCards}</div>
+
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input type="text" class="search-input" placeholder="Search SKU, model, requested by…"
+        value="${esc(f.search)}"
+        oninput="S.requisitions.filters.search=this.value"
+        onkeydown="if(event.key==='Enter')renderRequisitions()"
+        style="width:260px">
+      <select onchange="S.requisitions.filters.status=this.value;renderRequisitions()">
+        <option value="">All Statuses</option>
+        ${REQ_STATUSES.map(s => `<option value="${esc(s)}" ${f.status===s?'selected':''}>${esc(s)}</option>`).join('')}
+      </select>
+      <select onchange="S.requisitions.filters.priority=this.value;renderRequisitions()">
+        <option value="">All Priorities</option>
+        <option value="Urgent" ${f.priority==='Urgent'?'selected':''}>Urgent</option>
+        <option value="Normal" ${f.priority==='Normal'?'selected':''}>Normal</option>
+      </select>
+      <select onchange="S.requisitions.filters.part_category=this.value;renderRequisitions()">
+        <option value="">All Categories</option>
+        ${PART_CATEGORIES.map(c => `<option value="${esc(c)}" ${f.part_category===c?'selected':''}>${esc(c)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="toolbar-right">
+      <button class="btn btn-outline btn-sm" onclick="S.requisitions.filters={status:'',priority:'',part_category:'',search:''};renderRequisitions()">Clear</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Status</th><th>Priority</th><th>Part SKU</th><th>Model</th>
+        <th>Category</th><th>Qty Needed</th><th>Actual Ordered</th>
+        <th>Requested By</th><th>Date</th><th>Actions</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+// ─── New/Edit modal ───────────────────────────────────────────────────────────
+function openRequisitionModal(prefill = {}) {
+  const today = new Date().toISOString().slice(0, 10);
+  const typeOpts = PART_TYPES.map(t =>
+    `<option value="${t.code}" ${prefill.part_type === t.code ? 'selected' : ''}>${t.code} — ${t.label}</option>`
+  ).join('');
+  const colorOpts = ['NA','Black','White','Silver','Gold','Rose Gold','Blue','Green','Purple','Red','Yellow'].map(c =>
+    `<option value="${c}" ${(prefill.color || 'NA') === c ? 'selected' : ''}>${c}</option>`
+  ).join('');
+  const warehouseOpts = WAREHOUSE_LOCATIONS.map(w =>
+    `<option value="${w}" ${prefill.warehouse_location === w ? 'selected' : ''}>${w}</option>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-header">
+      <h3>New Parts Request</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Request Date</label>
+          <input type="date" id="rq-date" value="${prefill.request_date || today}">
+        </div>
+        <div class="form-group">
+          <label>Priority</label>
+          <select id="rq-priority">
+            <option value="Normal" ${(prefill.priority||'Normal')==='Normal'?'selected':''}>Normal</option>
+            <option value="Urgent" ${prefill.priority==='Urgent'?'selected':''}>Urgent</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Requested By</label>
+        <input type="text" id="rq-requested-by" value="${esc(prefill.requested_by || (S.user?.username || ''))}">
+      </div>
+
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Part Type</label>
+          <select id="rq-part-type" onchange="reqTypeChanged()">
+            <option value="">— Select —</option>
+            ${typeOpts}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Quality</label>
+          <select id="rq-quality" onchange="reqUpdateSkuPreview()">
+            <option value="OEM" ${(prefill.quality||'OEM')==='OEM'?'selected':''}>OEM</option>
+            <option value="Aftermarket" ${prefill.quality==='Aftermarket'?'selected':''}>Aftermarket</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid form-grid-3" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Device Brand</label>
+          <select id="rq-brand" onchange="reqBrandChanged()">
+            <option value="">— Select Brand —</option>
+            ${PARTS_DEVICE_BRANDS.map(b => `<option value="${esc(b)}" ${detectBrandFromModel(prefill.model_compatibility)===b?'selected':''}>${esc(b)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Model Compatibility</label>
+          <select id="rq-model" onchange="reqModelChanged()">
+            <option value="">— Select brand first —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Color</label>
+          <select id="rq-color" onchange="reqUpdateSkuPreview()">
+            ${colorOpts}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Part Category</label>
+        <select id="rq-part-category">
+          <option value="">— Select —</option>
+          ${PART_CATEGORIES.map(c => `<option value="${esc(c)}" ${(prefill.part_category||'')===c?'selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+
+      <div style="background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+        <div style="font-size:11px;font-weight:700;color:#1d4ed8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">SKU Preview</div>
+        <div id="rq-sku-preview" style="font-family:'SF Mono',Menlo,monospace;font-size:15px;font-weight:700;color:#1e40af;letter-spacing:.03em">${esc(prefill.part_sku || 'OTHR-Unknown-NA-OEM')}</div>
+      </div>
+
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Quantity Needed</label>
+          <input type="number" id="rq-qty" value="${prefill.quantity_needed || 1}" min="1">
+        </div>
+        <div class="form-group">
+          <label>Warehouse Location</label>
+          <select id="rq-warehouse">
+            <option value="">— Select —</option>
+            ${warehouseOpts}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Notes</label>
+        <textarea id="rq-notes" rows="3">${esc(prefill.notes || '')}</textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRequisition(0)">Submit Request</button>
+    </div>
+  `);
+
+  // Trigger initial state
+  if (prefill.part_type) reqTypeChanged(true);
+  // Populate models for pre-filled brand
+  reqBrandChanged(prefill.model_compatibility);
+}
+
+function reqBrandChanged(preselect) {
+  const brand = document.getElementById('rq-brand')?.value || '';
+  const modelSel = document.getElementById('rq-model');
+  if (!modelSel) return;
+  const models = reqModelsForBrand(brand);
+  if (!models.length) {
+    modelSel.innerHTML = '<option value="">— Select brand first —</option>';
+  } else {
+    modelSel.innerHTML = '<option value="">— Select model —</option>' +
+      models.map(m => `<option value="${esc(m)}" ${(preselect||'')===m?'selected':''}>${esc(m)}</option>`).join('');
+  }
+  if (!preselect) reqUpdateSkuPreview();
+}
+
+function reqTypeChanged(skipPreview) {
+  const typeCode = document.getElementById('rq-part-type')?.value;
+  const pt = PART_TYPES.find(t => t.code === typeCode);
+  const colorSel = document.getElementById('rq-color');
+  if (!colorSel) return;
+  if (pt && pt.colorNA) {
+    colorSel.value = 'NA';
+    colorSel.disabled = true;
+  } else {
+    colorSel.disabled = false;
+  }
+  if (!skipPreview) reqUpdateSkuPreview();
+}
+
+function reqModelChanged() {
+  const model = document.getElementById('rq-model')?.value;
+  const catSel = document.getElementById('rq-part-category');
+  if (catSel && model) {
+    const cat = inferPartCategory(model);
+    if (cat) catSel.value = cat;
+  }
+  reqUpdateSkuPreview();
+}
+
+function reqUpdateSkuPreview() {
+  const typeCode = document.getElementById('rq-part-type')?.value || 'OTHR';
+  const model    = document.getElementById('rq-model')?.value || 'Unknown';
+  const color    = document.getElementById('rq-color')?.value || 'NA';
+  const quality  = document.getElementById('rq-quality')?.value || 'OEM';
+  const sku = buildSku(typeCode, model, color, quality);
+  const preview = document.getElementById('rq-sku-preview');
+  if (preview) preview.textContent = sku;
+}
+
+async function saveRequisition(id) {
+  const typeCode = document.getElementById('rq-part-type')?.value;
+  const model    = document.getElementById('rq-model')?.value;
+  const color    = document.getElementById('rq-color')?.value || 'NA';
+  const quality  = document.getElementById('rq-quality')?.value || 'OEM';
+  const sku = buildSku(typeCode || 'OTHR', model || 'Unknown', color, quality);
+
+  const body = {
+    request_date:        document.getElementById('rq-date')?.value,
+    requested_by:        document.getElementById('rq-requested-by')?.value?.trim(),
+    part_type:           typeCode,
+    part_category:       document.getElementById('rq-part-category')?.value,
+    model_compatibility: model,
+    color,
+    quality,
+    part_sku:            sku,
+    quantity_needed:     parseInt(document.getElementById('rq-qty')?.value) || 1,
+    priority:            document.getElementById('rq-priority')?.value || 'Normal',
+    status:              'Requested',
+    warehouse_location:  document.getElementById('rq-warehouse')?.value,
+    notes:               document.getElementById('rq-notes')?.value?.trim(),
+  };
+
+  if (!body.request_date) return alert('Request date is required.');
+  if (!body.requested_by) return alert('Requested By is required.');
+
+  try {
+    if (id) {
+      await api('PUT', '/api/requisitions/' + id, body);
+      showToast('Requisition updated.');
+    } else {
+      await api('POST', '/api/requisitions', body);
+      showToast('Request submitted.');
+    }
+    closeModal();
+    renderRequisitions();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── Detail / Edit modal ──────────────────────────────────────────────────────
+async function openRequisitionDetail(id) {
+  openModal(`<div class="modal-body" style="text-align:center;padding:40px"><div class="loader"></div></div>`);
+  try {
+    const r = await api('GET', '/api/requisitions/' + id);
+    _showRequisitionDetail(r);
+  } catch (err) { alert(err.message); closeModal(); }
+}
+
+function _showRequisitionDetail(r) {
+  const isAdmin = S.user?.role === 'admin';
+  const showActualOrdered = ['Approved','Converted to PO'].includes(r.status);
+  const typeOpts = PART_TYPES.map(t =>
+    `<option value="${t.code}" ${r.part_type === t.code ? 'selected' : ''}>${t.code} — ${t.label}</option>`
+  ).join('');
+  const colorOpts = ['NA','Black','White','Silver','Gold','Rose Gold','Blue','Green','Purple','Red','Yellow'].map(c =>
+    `<option value="${c}" ${(r.color || 'NA') === c ? 'selected' : ''}>${c}</option>`
+  ).join('');
+  const warehouseOpts = WAREHOUSE_LOCATIONS.map(w =>
+    `<option value="${w}" ${r.warehouse_location === w ? 'selected' : ''}>${w}</option>`
+  ).join('');
+
+  openModal(`
+    <div class="modal-header">
+      <div>
+        <h3 style="display:flex;align-items:center;gap:10px">
+          Requisition #${r.id}
+          ${reqStatusBadge(r.status)}
+          ${reqPriorityBadge(r.priority)}
+        </h3>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:13px;color:var(--blue);margin-top:4px">${esc(r.part_sku || '')}</div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+
+      <div class="form-section-title">Status &amp; Priority</div>
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Status</label>
+          <select id="rd-status" onchange="rdStatusChanged()">
+            ${REQ_STATUSES.map(s => `<option value="${esc(s)}" ${r.status===s?'selected':''}>${esc(s)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Priority</label>
+          <select id="rd-priority">
+            <option value="Normal" ${(r.priority||'Normal')==='Normal'?'selected':''}>Normal</option>
+            <option value="Urgent" ${r.priority==='Urgent'?'selected':''}>Urgent</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="rd-actual-ordered-wrap" style="margin-bottom:14px;display:${showActualOrdered?'block':'none'}">
+        <div class="form-group">
+          <label>Actual Ordered</label>
+          <input type="number" id="rd-actual-ordered" value="${r.actual_ordered != null ? r.actual_ordered : ''}" min="0" style="width:100%">
+        </div>
+      </div>
+
+      <div id="rd-po-details-wrap" style="margin-bottom:14px;display:${r.status==='Converted to PO'&&!r.po_id?'block':'none'}">
+        <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:12px 16px">
+          <div style="font-size:11px;font-weight:700;color:#15803d;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">🛒 PO Details</div>
+          <div class="form-grid form-grid-2">
+            <div class="form-group">
+              <label>Vendor <span style="color:var(--red)">*</span></label>
+              <select id="rd-po-vendor">
+                <option value="">— Select Vendor —</option>
+                ${getCatalogVendors().map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Expected Delivery</label>
+              <input type="date" id="rd-po-delivery" value="">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      ${r.po_id ? `<div style="margin-bottom:14px;padding:10px 14px;background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:8px;font-size:13px">
+        📦 Linked to <strong>PO #${r.po_id}</strong> — <a href="#" onclick="event.preventDefault();closeModal();renderPartsPO();" style="color:var(--blue)">View in Parts PO</a>
+      </div>` : ''}
+
+      <div class="form-section-title" style="margin-top:8px">Part Details</div>
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Part Type</label>
+          <select id="rd-part-type" onchange="rdTypeChanged()">
+            <option value="">— Select —</option>
+            ${typeOpts}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Quality</label>
+          <select id="rd-quality" onchange="rdUpdateSku()">
+            <option value="OEM" ${(r.quality||'OEM')==='OEM'?'selected':''}>OEM</option>
+            <option value="Aftermarket" ${r.quality==='Aftermarket'?'selected':''}>Aftermarket</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid form-grid-3" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Device Brand</label>
+          <select id="rd-brand" onchange="rdBrandChanged()">
+            <option value="">— Select Brand —</option>
+            ${PARTS_DEVICE_BRANDS.map(b => `<option value="${esc(b)}" ${detectBrandFromModel(r.model_compatibility)===b?'selected':''}>${esc(b)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Model Compatibility</label>
+          <select id="rd-model" onchange="rdModelChanged()">
+            <option value="">— Select brand first —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Color</label>
+          <select id="rd-color" onchange="rdUpdateSku()">
+            ${colorOpts}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Part Category</label>
+        <select id="rd-part-category">
+          <option value="">— Select —</option>
+          ${PART_CATEGORIES.map(c => `<option value="${esc(c)}" ${(r.part_category||'')===c?'selected':''}>${esc(c)}</option>`).join('')}
+        </select>
+      </div>
+
+      <div style="background:#eff6ff;border:1.5px solid #bfdbfe;border-radius:8px;padding:12px 16px;margin-bottom:14px">
+        <div style="font-size:11px;font-weight:700;color:#1d4ed8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">SKU Preview</div>
+        <div id="rd-sku-preview" style="font-family:'SF Mono',Menlo,monospace;font-size:15px;font-weight:700;color:#1e40af;letter-spacing:.03em">${esc(r.part_sku || '')}</div>
+      </div>
+
+      <div class="form-section-title">Request Info</div>
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Request Date</label>
+          <input type="date" id="rd-date" value="${r.request_date ? r.request_date.slice(0,10) : ''}">
+        </div>
+        <div class="form-group">
+          <label>Quantity Needed</label>
+          <input type="number" id="rd-qty" value="${r.quantity_needed || 1}" min="1">
+        </div>
+      </div>
+
+      <div class="form-grid form-grid-2" style="margin-bottom:14px">
+        <div class="form-group">
+          <label>Requested By</label>
+          <input type="text" id="rd-requested-by" value="${esc(r.requested_by || '')}">
+        </div>
+        <div class="form-group">
+          <label>Warehouse Location</label>
+          <select id="rd-warehouse">
+            <option value="">— Select —</option>
+            ${warehouseOpts}
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Notes</label>
+        <textarea id="rd-notes" rows="3">${esc(r.notes || '')}</textarea>
+      </div>
+
+      ${r.created_by ? `<div style="margin-top:12px;font-size:11px;color:var(--muted)">Created by ${esc(r.created_by)} · ${r.created_at ? r.created_at.slice(0,10) : ''}</div>` : ''}
+    </div>
+    <div class="modal-footer">
+      ${isAdmin ? `<button class="btn btn-danger" onclick="deleteRequisition(${r.id})" style="margin-right:auto">Delete</button>` : ''}
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRequisitionDetail(${r.id})">Save Changes</button>
+    </div>
+  `);
+
+  // init color disable state + brand cascade
+  rdTypeChanged(true);
+  rdBrandChanged(r.model_compatibility);
+}
+
+function rdStatusChanged() {
+  const status = document.getElementById('rd-status')?.value;
+  const wrap = document.getElementById('rd-actual-ordered-wrap');
+  if (wrap) wrap.style.display = ['Approved','Converted to PO'].includes(status) ? 'block' : 'none';
+  // Show PO details section only when newly setting to Converted to PO (no existing po_id)
+  const poWrap = document.getElementById('rd-po-details-wrap');
+  if (poWrap) poWrap.style.display = status === 'Converted to PO' ? 'block' : 'none';
+}
+
+function rdTypeChanged(skipPreview) {
+  const typeCode = document.getElementById('rd-part-type')?.value;
+  const pt = PART_TYPES.find(t => t.code === typeCode);
+  const colorSel = document.getElementById('rd-color');
+  if (!colorSel) return;
+  if (pt && pt.colorNA) {
+    colorSel.value = 'NA';
+    colorSel.disabled = true;
+  } else {
+    colorSel.disabled = false;
+  }
+  if (!skipPreview) rdUpdateSku();
+}
+
+function rdBrandChanged(preselect) {
+  const brand = document.getElementById('rd-brand')?.value || '';
+  const modelSel = document.getElementById('rd-model');
+  if (!modelSel) return;
+  const models = reqModelsForBrand(brand);
+  if (!models.length) {
+    modelSel.innerHTML = '<option value="">— Select brand first —</option>';
+  } else {
+    modelSel.innerHTML = '<option value="">— Select model —</option>' +
+      models.map(m => `<option value="${esc(m)}" ${(preselect||'')===m?'selected':''}>${esc(m)}</option>`).join('');
+  }
+  if (!preselect) rdUpdateSku();
+}
+
+function rdModelChanged() {
+  const model = document.getElementById('rd-model')?.value;
+  const catSel = document.getElementById('rd-part-category');
+  if (catSel && model) {
+    const cat = inferPartCategory(model);
+    if (cat) catSel.value = cat;
+  }
+  rdUpdateSku();
+}
+
+function rdUpdateSku() {
+  const typeCode = document.getElementById('rd-part-type')?.value || 'OTHR';
+  const model    = document.getElementById('rd-model')?.value || 'Unknown';
+  const color    = document.getElementById('rd-color')?.value || 'NA';
+  const quality  = document.getElementById('rd-quality')?.value || 'OEM';
+  const sku = buildSku(typeCode, model, color, quality);
+  const preview = document.getElementById('rd-sku-preview');
+  if (preview) preview.textContent = sku;
+}
+
+async function saveRequisitionDetail(id) {
+  const typeCode = document.getElementById('rd-part-type')?.value;
+  const model    = document.getElementById('rd-model')?.value;
+  const color    = document.getElementById('rd-color')?.value || 'NA';
+  const quality  = document.getElementById('rd-quality')?.value || 'OEM';
+  const status   = document.getElementById('rd-status')?.value || 'Requested';
+  const sku = buildSku(typeCode || 'OTHR', model || 'Unknown', color, quality);
+
+  const actualOrderedVal = document.getElementById('rd-actual-ordered')?.value;
+
+  const body = {
+    request_date:        document.getElementById('rd-date')?.value,
+    requested_by:        document.getElementById('rd-requested-by')?.value?.trim(),
+    part_type:           typeCode,
+    part_category:       document.getElementById('rd-part-category')?.value,
+    model_compatibility: model,
+    color,
+    quality,
+    part_sku:            sku,
+    quantity_needed:     parseInt(document.getElementById('rd-qty')?.value) || 1,
+    actual_ordered:      actualOrderedVal !== '' && actualOrderedVal != null ? parseInt(actualOrderedVal) : null,
+    priority:            document.getElementById('rd-priority')?.value || 'Normal',
+    status,
+    warehouse_location:  document.getElementById('rd-warehouse')?.value,
+    notes:               document.getElementById('rd-notes')?.value?.trim(),
+  };
+
+  if (!body.request_date) return alert('Request date is required.');
+  if (!body.requested_by) return alert('Requested By is required.');
+
+  // If converting to PO and no PO exists yet, validate vendor is selected
+  const poDetailsVisible = document.getElementById('rd-po-details-wrap')?.style.display !== 'none';
+  const poVendor = document.getElementById('rd-po-vendor')?.value || '';
+  const poDelivery = document.getElementById('rd-po-delivery')?.value || null;
+  if (status === 'Converted to PO' && poDetailsVisible && !poVendor) {
+    return alert('Please select a vendor to create the Purchase Order.');
+  }
+
+  try {
+    await api('PUT', '/api/requisitions/' + id, body);
+
+    // Create the PO if status was just set to Converted to PO
+    if (status === 'Converted to PO' && poDetailsVisible && poVendor) {
+      const poResult = await api('POST', '/api/parts-pos/from-requisition/' + id, {
+        vendor: poVendor,
+        expected_delivery: poDelivery
+      });
+      showToast('Requisition updated & PO #' + poResult.id + ' created!');
+    } else {
+      showToast('Requisition updated.');
+    }
+    closeModal();
+    renderRequisitions();
+    if (S.screen === 'parts-po') renderPartsPO();
+  } catch (err) { alert(err.message); }
+}
+
+async function deleteRequisition(id) {
+  if (!confirm(`Delete Requisition #${id}? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', '/api/requisitions/' + id);
+    showToast('Requisition deleted.');
+    closeModal();
+    renderRequisitions();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── Parts PO Constants ────────────────────────────────────────────────────────
+const PO_STATUSES = ['Open','Partial','Closed','Cancelled'];
+const SO_STATUSES = ['Open','In Progress','Completed','Cancelled'];
+const REPAIR_TYPES = ['Battery Replacement','Screen Replacement','Digitizer Replacement','Housing Replacement','Camera Repair','Speaker Repair','Charging Port Repair','Water Damage','Other'];
+const VENDORS_DEFAULT = ['Rewa','Maya Parts','Mobilesentrix','APTO','Loacal_CA','Other'];
+function getCatalogVendors() {
+  return (S.catalog?.vendors?.length) ? S.catalog.vendors : VENDORS_DEFAULT;
+}
+const WAREHOUSES = ['Milpitas 741','Other'];
+
+// ─── Badge Helpers ──────────────────────────────────────────────────────────────
+function poStatusBadge(s) {
+  const map = { 'Open': 'background:#fef3c7;color:#92400e', 'Partial': 'background:#dbeafe;color:#1d4ed8', 'Closed': 'background:#dcfce7;color:#15803d', 'Cancelled': 'background:#f1f5f9;color:#374151' };
+  return `<span class="badge" style="${map[s]||'background:#f1f5f9;color:#374151'}">${esc(s||'Open')}</span>`;
+}
+function soStatusBadge(s) {
+  const map = { 'Open': 'background:#fef3c7;color:#92400e', 'In Progress': 'background:#dbeafe;color:#1d4ed8', 'Completed': 'background:#dcfce7;color:#15803d', 'Cancelled': 'background:#f1f5f9;color:#374151' };
+  return `<span class="badge" style="${map[s]||'background:#f1f5f9;color:#374151'}">${esc(s||'Open')}</span>`;
+}
+function stockLevelBadge(qty) {
+  qty = Number(qty) || 0;
+  if (qty <= 0) return `<span class="badge" style="background:#fee2e2;color:#b91c1c">${qty}</span>`;
+  if (qty <= 5) return `<span class="badge" style="background:#fef3c7;color:#92400e">${qty}</span>`;
+  return `<span class="badge" style="background:#dcfce7;color:#15803d">${qty}</span>`;
+}
+
+// ─── Convert Req → PO ──────────────────────────────────────────────────────────
+function convertReqToPO(reqId) {
+  const vendorOpts = getCatalogVendors().map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  const today = new Date().toISOString().slice(0,10);
+  openModal(`
+    <div class="modal-header">
+      <h3>Convert Req #${reqId} → Purchase Order</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Vendor <span style="color:var(--red)">*</span></label>
+        <select id="ctp-vendor">
+          <option value="">— Select Vendor —</option>
+          ${vendorOpts}
+        </select>
+      </div>
+      <div class="form-group" style="margin-bottom:14px">
+        <label>Expected Delivery Date</label>
+        <input type="date" id="ctp-delivery" value="">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doConvertReqToPO(${reqId})">Create PO</button>
+    </div>
+  `);
+}
+
+async function doConvertReqToPO(reqId) {
+  const vendor = document.getElementById('ctp-vendor')?.value;
+  if (!vendor) return alert('Please select a vendor.');
+  const expected_delivery = document.getElementById('ctp-delivery')?.value || null;
+  try {
+    const r = await api('POST', '/api/parts-pos/from-requisition/' + reqId, { vendor, expected_delivery });
+    showToast('PO #' + r.id + ' created!');
+    closeModal();
+    renderRequisitions();
+    if (S.screen === 'parts-po') renderPartsPO();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── Parts PO Items Editor (shared) ────────────────────────────────────────────
+function poItemsTableHtml(items = []) {
+  const rows = items.map((it, i) => `
+    <tr id="po-item-row-${i}">
+      <td><input type="text" class="poi-sku" value="${esc(it.part_sku||'')}" style="width:100%;font-family:monospace;font-size:12px" placeholder="BTRY-iPhone13-NA-OEM"></td>
+      <td><input type="number" class="poi-qty" value="${it.quantity_ordered||1}" min="1" style="width:60px" oninput="updatePOTotal()"></td>
+      <td><input type="number" class="poi-rxd" value="${it.received_quantity||0}" min="0" style="width:60px"></td>
+      <td><input type="number" class="poi-price" value="${it.unit_price||0}" min="0" step="0.01" style="width:80px" oninput="updatePOTotal()"></td>
+      <td style="text-align:right;font-size:12px;font-weight:600;white-space:nowrap;color:var(--blue)">$<span class="poi-line-total">${((it.quantity_ordered||1)*(it.unit_price||0)).toFixed(2)}</span></td>
+      <td><button class="btn btn-danger btn-sm btn-icon" onclick="removePOItemRow(${i});updatePOTotal()" title="Remove">✕</button></td>
+    </tr>`).join('');
+  return `
+    <table style="width:100%;border-collapse:collapse;font-size:13px" id="po-items-table">
+      <thead><tr style="background:#f8fafc">
+        <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Part SKU</th>
+        <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Qty Ord.</th>
+        <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Rcvd</th>
+        <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Unit ($)</th>
+        <th style="padding:6px 8px;text-align:right;font-size:11px;color:var(--muted);font-weight:600">Line Total</th>
+        <th style="padding:6px 8px"></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr style="background:#eff6ff;border-top:2px solid #bfdbfe">
+        <td colspan="4" style="padding:8px;font-size:12px;font-weight:700;color:#1d4ed8;text-align:right">TOTAL PO AMOUNT</td>
+        <td style="padding:8px;text-align:right;font-size:14px;font-weight:800;color:#1d4ed8">$<span id="po-grand-total">${items.reduce((s,it)=>s+(it.quantity_ordered||1)*(it.unit_price||0),0).toFixed(2)}</span></td>
+        <td></td>
+      </tr></tfoot>
+    </table>`;
+}
+function updatePOTotal() {
+  const qtys   = document.querySelectorAll('.poi-qty');
+  const prices  = document.querySelectorAll('.poi-price');
+  const lineTotals = document.querySelectorAll('.poi-line-total');
+  let grand = 0;
+  for (let i = 0; i < qtys.length; i++) {
+    const q = parseFloat(qtys[i]?.value) || 0;
+    const p = parseFloat(prices[i]?.value) || 0;
+    const line = q * p;
+    grand += line;
+    if (lineTotals[i]) lineTotals[i].textContent = line.toFixed(2);
+  }
+  const grandEl = document.getElementById('po-grand-total');
+  if (grandEl) grandEl.textContent = grand.toFixed(2);
+}
+function addPOItemRow() {
+  const tbody = document.querySelector('#po-items-table tbody');
+  if (!tbody) return;
+  const i = tbody.rows.length;
+  const tr = document.createElement('tr');
+  tr.id = 'po-item-row-' + i;
+  tr.innerHTML = `
+    <td><input type="text" class="poi-sku" value="" style="width:100%;font-family:monospace;font-size:12px" placeholder="BTRY-iPhone13-NA-OEM"></td>
+    <td><input type="number" class="poi-qty" value="1" min="1" style="width:60px" oninput="updatePOTotal()"></td>
+    <td><input type="number" class="poi-rxd" value="0" min="0" style="width:60px"></td>
+    <td><input type="number" class="poi-price" value="0" min="0" step="0.01" style="width:80px" oninput="updatePOTotal()"></td>
+    <td style="text-align:right;font-size:12px;font-weight:600;color:var(--blue)">$<span class="poi-line-total">0.00</span></td>
+    <td><button class="btn btn-danger btn-sm btn-icon" onclick="this.closest('tr').remove();updatePOTotal()" title="Remove">✕</button></td>`;
+  tbody.appendChild(tr);
+}
+function removePOItemRow(i) {
+  const row = document.getElementById('po-item-row-' + i);
+  if (row) row.remove();
+}
+function collectPOItems() {
+  const skus = document.querySelectorAll('.poi-sku');
+  const qtys = document.querySelectorAll('.poi-qty');
+  const rxds = document.querySelectorAll('.poi-rxd');
+  const prices = document.querySelectorAll('.poi-price');
+  const items = [];
+  for (let i = 0; i < skus.length; i++) {
+    const sku = skus[i].value.trim();
+    if (!sku) continue;
+    items.push({ part_sku: sku, quantity_ordered: parseInt(qtys[i]?.value)||1, received_quantity: parseInt(rxds[i]?.value)||0, unit_price: parseFloat(prices[i]?.value)||0 });
+  }
+  return items;
+}
+
+// ─── renderPartsPO ──────────────────────────────────────────────────────────────
+async function renderPartsPO() {
+  const el = document.getElementById('screen-parts-po');
+  el.innerHTML = `<div class="screen-header"><h2>Parts Purchase Orders</h2><p style="color:var(--muted);font-size:13px">Loading…</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
+  try {
+    const f = S.partspo.filters;
+    const qs = new URLSearchParams();
+    if (f.status) qs.set('status', f.status);
+    if (f.vendor) qs.set('vendor', f.vendor);
+    if (f.search) qs.set('search', f.search);
+    const data = await api('GET', '/api/parts-pos?' + qs.toString());
+    S.partspo.list = data.pos;
+    S.partspo.stats = data.stats;
+    _renderPartsPOList(data);
+  } catch (err) {
+    el.innerHTML = `<div class="alert alert-error">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+function _renderPartsPOList(data) {
+  const el = document.getElementById('screen-parts-po');
+  const { pos, stats, total } = data;
+  const f = S.partspo.filters;
+  const statCards = [
+    { label: 'Total POs', value: total, color: 'blue', key: '' },
+    { label: 'Open', value: stats['Open'] || 0, color: 'amber', key: 'Open' },
+    { label: 'Partial', value: stats['Partial'] || 0, color: 'blue', key: 'Partial' },
+    { label: 'Closed', value: stats['Closed'] || 0, color: 'green', key: 'Closed' },
+  ].map(d => `
+    <div class="stat-card ${d.color}" style="cursor:pointer" onclick="S.partspo.filters.status='${d.key}';renderPartsPO()">
+      <div class="stat-label">${d.label}</div>
+      <div class="stat-value">${d.value}</div>
+    </div>`).join('');
+
+  const rows = pos.length ? pos.map(p => {
+    const ordQty  = parseInt(p.total_ordered)  || 0;
+    const rxdQty  = parseInt(p.total_received) || 0;
+    const pct     = ordQty > 0 ? Math.round(rxdQty / ordQty * 100) : 0;
+    const isActive = !['Closed','Cancelled'].includes(p.status);
+    const rxdColor = rxdQty >= ordQty && ordQty > 0 ? '#15803d' : rxdQty > 0 ? '#1d4ed8' : 'var(--muted)';
+    return `
+    <tr onclick="openPartsPODetail(${p.id})" style="cursor:pointer">
+      <td style="font-weight:600;color:var(--blue)">#${p.id}</td>
+      <td>${poStatusBadge(p.status)}</td>
+      <td>${esc(p.vendor)}</td>
+      <td style="text-align:center;font-weight:600">${ordQty}</td>
+      <td style="text-align:center">
+        <div style="font-weight:700;color:${rxdColor}">${rxdQty}</div>
+        ${ordQty > 0 ? `<div style="margin-top:3px;height:4px;background:#e2e8f0;border-radius:2px;width:60px;margin-inline:auto">
+          <div style="height:4px;border-radius:2px;width:${pct}%;background:${rxdQty>=ordQty?'#16a34a':'#3b82f6'}"></div>
+        </div>` : ''}
+      </td>
+      <td style="text-align:right;font-weight:600;color:var(--txt)">$${parseFloat(p.total_amount||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+      <td>${fmtDate(p.order_date)}</td>
+      <td>${p.expected_delivery ? fmtDate(p.expected_delivery) : '<span style="color:var(--muted)">—</span>'}</td>
+      <td style="color:var(--muted);font-size:12px">${esc(p.warehouse_destination || '—')}</td>
+      <td style="white-space:nowrap">
+        ${isActive ? `<button class="btn btn-success btn-sm" onclick="event.stopPropagation();openReceivePOModal(${p.id})" style="margin-right:6px">Receive</button>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openPartsPODetail(${p.id})">View</button>
+      </td>
+    </tr>`;
+  }).join('')
+    : `<tr><td colspan="10"><div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><p>No purchase orders found</p></div></td></tr>`;
+
+  el.innerHTML = `
+  <div class="screen-header" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div><h2>Parts Purchase Orders</h2><p style="color:var(--muted);font-size:13px;margin-top:3px">${total} total PO${total !== 1 ? 's' : ''}</p></div>
+    <button class="btn btn-primary" onclick="openPartsPOModal()">
+      <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New PO
+    </button>
+  </div>
+  <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">${statCards}</div>
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input type="text" class="search-input" placeholder="Search PO# or vendor…" value="${esc(f.search)}"
+        oninput="S.partspo.filters.search=this.value"
+        onkeydown="if(event.key==='Enter')renderPartsPO()" style="width:220px">
+      <select onchange="S.partspo.filters.vendor=this.value;renderPartsPO()">
+        <option value="">All Vendors</option>
+        ${getCatalogVendors().map(v => `<option value="${esc(v)}" ${f.vendor===v?'selected':''}>${esc(v)}</option>`).join('')}
+      </select>
+      <select onchange="S.partspo.filters.status=this.value;renderPartsPO()">
+        <option value="">All Statuses</option>
+        ${PO_STATUSES.map(s => `<option value="${esc(s)}" ${f.status===s?'selected':''}>${esc(s)}</option>`).join('')}
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="S.partspo.filters={status:'',vendor:'',search:''};renderPartsPO()">Clear</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>PO #</th><th>Status</th><th>Vendor</th>
+        <th style="text-align:center">Ordered Qty</th>
+        <th style="text-align:center">Received Qty</th>
+        <th style="text-align:right">Total ($)</th>
+        <th>Order Date</th><th>Expected Delivery</th><th>Warehouse</th><th>Actions</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="table-foot">${total} record${total !== 1 ? 's' : ''}</div>
+  </div>`;
+}
+
+// ─── openPartsPOModal ───────────────────────────────────────────────────────────
+function openPartsPOModal(prefill = {}) {
+  const today = new Date().toISOString().slice(0, 10);
+  openModal(`
+    <div class="modal-header">
+      <h3>New Parts Purchase Order</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-section">
+        <div class="form-section-title">PO Header</div>
+        <div class="form-grid form-grid-2">
+          <div class="form-group">
+            <label>Vendor *</label>
+            <select id="po-vendor">
+              ${getCatalogVendors().map(v => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Warehouse</label>
+            <select id="po-warehouse">
+              ${WAREHOUSES.map(w => `<option value="${esc(w)}" ${w==='Milpitas 741'?'selected':''}>${esc(w)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Order Date *</label>
+            <input type="date" id="po-order-date" value="${today}">
+          </div>
+          <div class="form-group">
+            <label>Expected Delivery</label>
+            <input type="date" id="po-expected-delivery">
+          </div>
+        </div>
+        <div class="form-group" style="margin-top:10px">
+          <label>Notes</label>
+          <textarea id="po-notes" rows="2"></textarea>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Line Items</div>
+        <div id="po-items-wrap">${poItemsTableHtml([{ part_sku: '', quantity_ordered: 1, received_quantity: 0, unit_price: 0 }])}</div>
+        <button class="btn btn-outline btn-sm mt8" onclick="addPOItemRow()">+ Add Part</button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveNewPO()">Create PO</button>
+    </div>`);
+}
+
+async function saveNewPO() {
+  const vendor = document.getElementById('po-vendor')?.value;
+  const order_date = document.getElementById('po-order-date')?.value;
+  const expected_delivery = document.getElementById('po-expected-delivery')?.value;
+  const warehouse_destination = document.getElementById('po-warehouse')?.value;
+  const notes = document.getElementById('po-notes')?.value?.trim();
+  if (!vendor || !order_date) return alert('Vendor and Order Date are required.');
+  const items = collectPOItems();
+  try {
+    const r = await api('POST', '/api/parts-pos', { vendor, order_date, expected_delivery: expected_delivery || null, warehouse_destination, notes, items });
+    showToast('PO #' + r.id + ' created!');
+    closeModal();
+    renderPartsPO();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── openPartsPODetail ──────────────────────────────────────────────────────────
+async function openPartsPODetail(id) {
+  openModal(`<div class="modal-body" style="text-align:center;padding:40px"><div class="loader"></div></div>`);
+  try {
+    const po = await api('GET', '/api/parts-pos/' + id);
+    const isAdmin = S.user?.role === 'admin';
+    const totalOrdered = (po.items || []).reduce((s, i) => s + (i.quantity_ordered || 0), 0);
+    const totalReceived = (po.items || []).reduce((s, i) => s + (i.received_quantity || 0), 0);
+    const totalAmount = (po.items || []).reduce((s, i) => s + (i.quantity_ordered || 0) * (i.unit_price || 0), 0);
+    const itemRows = (po.items || []).map((it, idx) => `
+      <tr>
+        <td class="mono" style="font-size:12px">${esc(it.part_sku)}</td>
+        <td style="text-align:center">${it.quantity_ordered}</td>
+        <td style="text-align:center"><input type="number" id="rxd-${it.id}" value="${it.received_quantity||0}" min="0" max="${it.quantity_ordered}" style="width:60px;text-align:center"></td>
+        <td style="text-align:right">$${parseFloat(it.unit_price||0).toFixed(2)}</td>
+        <td style="text-align:right;font-weight:600;color:var(--blue)">$${((it.quantity_ordered||0)*(it.unit_price||0)).toFixed(2)}</td>
+        <td>${it.received_quantity >= it.quantity_ordered ? '<span class="badge" style="background:#dcfce7;color:#15803d">Done</span>' : ''}</td>
+      </tr>`).join('');
+
+    openModal(`
+      <div class="modal-header">
+        <h3>PO #${po.id} — ${esc(po.vendor)} ${poStatusBadge(po.status)}</h3>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-section">
+          <div class="form-section-title">Header</div>
+          <div class="form-grid form-grid-2">
+            <div class="form-group"><label>Vendor</label>
+              <select id="dpod-vendor">
+                ${getCatalogVendors().map(v => `<option value="${esc(v)}" ${po.vendor===v?'selected':''}>${esc(v)}</option>`).join('')}
+                ${!getCatalogVendors().includes(po.vendor) && po.vendor ? `<option value="${esc(po.vendor)}" selected>${esc(po.vendor)}</option>` : ''}
+              </select>
+            </div>
+            <div class="form-group"><label>Warehouse</label>
+              <select id="dpod-warehouse">${WAREHOUSES.map(w => `<option value="${esc(w)}" ${po.warehouse_destination===w?'selected':''}>${esc(w)}</option>`).join('')}</select>
+            </div>
+            <div class="form-group"><label>Order Date</label><input type="date" id="dpod-order-date" value="${(po.order_date||'').slice(0,10)}"></div>
+            <div class="form-group"><label>Expected Delivery</label><input type="date" id="dpod-exp-delivery" value="${(po.expected_delivery||'').slice(0,10)}"></div>
+          </div>
+          ${isAdmin ? `
+          <div class="form-group" style="margin-top:10px">
+            <label>Status (Admin)</label>
+            <select id="dpod-status">${PO_STATUSES.map(s => `<option value="${esc(s)}" ${po.status===s?'selected':''}>${esc(s)}</option>`).join('')}</select>
+          </div>` : ''}
+          <div class="form-group" style="margin-top:10px"><label>Notes</label><textarea id="dpod-notes" rows="2">${esc(po.notes||'')}</textarea></div>
+        </div>
+        <div class="form-section">
+          <div class="form-section-title">Line Items — ${totalReceived}/${totalOrdered} received</div>
+          ${(po.items || []).length ? `
+          <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead><tr style="background:#f8fafc">
+                <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Part SKU</th>
+                <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Ordered</th>
+                <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Received</th>
+                <th style="padding:6px 8px;text-align:right;font-size:11px;color:var(--muted);font-weight:600">Unit ($)</th>
+                <th style="padding:6px 8px;text-align:right;font-size:11px;color:var(--muted);font-weight:600">Line Total</th>
+                <th></th>
+              </tr></thead>
+              <tbody>${itemRows}</tbody>
+              <tfoot><tr style="background:#eff6ff;border-top:2px solid #bfdbfe">
+                <td colspan="4" style="padding:8px;font-size:12px;font-weight:700;color:#1d4ed8;text-align:right">TOTAL PO AMOUNT</td>
+                <td style="padding:8px;text-align:right;font-size:15px;font-weight:800;color:#1d4ed8">$${totalAmount.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+                <td></td>
+              </tr></tfoot>
+            </table>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button class="btn btn-success btn-sm" onclick="markAllReceived(${JSON.stringify(po.items||[]).replace(/"/g,'&quot;')})">Mark All Received</button>
+          </div>` : '<p style="color:var(--muted);font-size:13px">No line items.</p>'}
+        </div>
+      </div>
+      <div class="modal-footer">
+        ${isAdmin ? `<button class="btn btn-danger" onclick="deletePO(${po.id})">Delete</button>` : ''}
+        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="savePartsPODetail(${po.id}, ${JSON.stringify(po.items||[]).replace(/"/g,'&quot;')})">Save Changes</button>
+      </div>`);
+  } catch (err) { openModal(`<div class="modal-body"><div class="alert alert-error">${esc(err.message)}</div></div>`); }
+}
+
+function markAllReceived(items) {
+  (items || []).forEach(it => {
+    const inp = document.getElementById('rxd-' + it.id);
+    if (inp) inp.value = it.quantity_ordered;
+  });
+}
+
+async function savePartsPODetail(poId, items) {
+  const vendor = document.getElementById('dpod-vendor')?.value?.trim();
+  const order_date = document.getElementById('dpod-order-date')?.value;
+  const expected_delivery = document.getElementById('dpod-exp-delivery')?.value;
+  const warehouse_destination = document.getElementById('dpod-warehouse')?.value;
+  const notes = document.getElementById('dpod-notes')?.value?.trim();
+  const status = document.getElementById('dpod-status')?.value;
+  if (!vendor || !order_date) return alert('Vendor and Order Date are required.');
+  // Save header
+  try {
+    await api('PUT', '/api/parts-pos/' + poId, { vendor, order_date, expected_delivery: expected_delivery || null, warehouse_destination, notes, status });
+    // Save each item's received quantity
+    for (const it of items) {
+      const inp = document.getElementById('rxd-' + it.id);
+      if (!inp) continue;
+      const rxd = parseInt(inp.value) || 0;
+      if (rxd !== (it.received_quantity || 0)) {
+        await api('PUT', '/api/parts-pos/' + poId + '/items/' + it.id, { ...it, received_quantity: rxd });
+      }
+    }
+    showToast('PO #' + poId + ' saved!');
+    closeModal();
+    renderPartsPO();
+  } catch (err) { alert(err.message); }
+}
+
+async function deletePO(id) {
+  if (!confirm(`Delete PO #${id}? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', '/api/parts-pos/' + id);
+    showToast('PO deleted.');
+    closeModal();
+    renderPartsPO();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── Receive PO Modal ──────────────────────────────────────────────────────────
+async function openReceivePOModal(poId) {
+  openModal(`<div class="modal-body" style="text-align:center;padding:40px"><div class="loader"></div></div>`);
+  try {
+    const po = await api('GET', '/api/parts-pos/' + poId);
+    const items = po.items || [];
+    if (!items.length) { openModal(`<div class="modal-body"><div class="alert alert-error">No line items on this PO.</div><div class="modal-footer"><button class="btn btn-outline" onclick="closeModal()">Close</button></div></div>`); return; }
+
+    const itemRows = items.map(it => {
+      const outstanding = Math.max(0, (it.quantity_ordered || 0) - (it.received_quantity || 0));
+      const pct = it.quantity_ordered > 0 ? Math.round((it.received_quantity||0) / it.quantity_ordered * 100) : 0;
+      const done = (it.received_quantity||0) >= (it.quantity_ordered||0);
+      return `
+      <tr style="${done ? 'opacity:.55' : ''}">
+        <td style="font-family:monospace;font-size:12px;padding:8px 6px">${esc(it.part_sku)}</td>
+        <td style="text-align:center;padding:8px 6px">${it.quantity_ordered}</td>
+        <td style="text-align:center;padding:8px 6px">
+          <span style="font-weight:700;color:${done?'#15803d':'var(--muted)'}">${it.received_quantity||0}</span>
+          <div style="margin-top:3px;height:4px;background:#e2e8f0;border-radius:2px">
+            <div style="height:4px;border-radius:2px;width:${pct}%;background:${done?'#16a34a':'#3b82f6'}"></div>
+          </div>
+        </td>
+        <td style="text-align:center;padding:8px 6px">
+          ${done
+            ? `<span class="badge" style="background:#dcfce7;color:#15803d">✓ Complete</span>`
+            : `<input type="number" id="recv-qty-${it.id}" value="${outstanding}" min="0" max="${outstanding}" style="width:65px;text-align:center;border:1.5px solid var(--border);border-radius:var(--r);padding:4px 6px;font-size:13px">`
+          }
+        </td>
+      </tr>`;
+    }).join('');
+
+    openModal(`
+      <div class="modal-header">
+        <div>
+          <h3>Receive Stock — PO #${po.id}</h3>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(po.vendor)} · ${esc(po.warehouse_destination||'')}</div>
+        </div>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:#15803d">
+          Enter quantities received for each part. Received items are immediately added to Parts Inventory.
+        </div>
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="background:#f8fafc">
+              <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Part SKU</th>
+              <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Ordered</th>
+              <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Already Received</th>
+              <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Qty Receiving Now</th>
+            </tr></thead>
+            <tbody>${itemRows}</tbody>
+          </table>
+        </div>
+        <div style="margin-top:12px;display:flex;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="receiveMarkAll(${JSON.stringify(items).replace(/"/g,'&quot;')})">Mark All Outstanding</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-success" onclick="submitReceivePO(${po.id}, ${JSON.stringify(items).replace(/"/g,'&quot;')})">
+          ✓ Confirm Receipt &amp; Add to Inventory
+        </button>
+      </div>`);
+  } catch (err) { openModal(`<div class="modal-body"><div class="alert alert-error">${esc(err.message)}</div></div>`); }
+}
+
+function receiveMarkAll(items) {
+  items.forEach(it => {
+    const inp = document.getElementById('recv-qty-' + it.id);
+    if (inp) inp.value = Math.max(0, (it.quantity_ordered||0) - (it.received_quantity||0));
+  });
+}
+
+async function submitReceivePO(poId, originalItems) {
+  // Build payload: new total received = prior received + qty entered now
+  const payload = originalItems
+    .filter(it => {
+      const inp = document.getElementById('recv-qty-' + it.id);
+      return inp && parseInt(inp.value) > 0;
+    })
+    .map(it => ({
+      id: it.id,
+      received_quantity: (it.received_quantity || 0) + (parseInt(document.getElementById('recv-qty-' + it.id)?.value) || 0)
+    }));
+
+  if (!payload.length) return alert('No quantities entered. Please enter how many units you are receiving.');
+
+  try {
+    const r = await api('POST', '/api/parts-pos/' + poId + '/receive', { items: payload });
+    const statusMsg = r.status ? ` — PO is now ${r.status}` : '';
+    showToast(`✓ Stock received${statusMsg}`);
+    closeModal();
+    renderPartsPO();
+    // Refresh inventory screen if it's open
+    if (S.screen === 'parts-inventory') renderPartsInventory();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── renderServiceOrders ────────────────────────────────────────────────────────
+async function renderServiceOrders() {
+  const el = document.getElementById('screen-service-orders');
+  el.innerHTML = `<div class="screen-header"><h2>Service Orders</h2><p style="color:var(--muted);font-size:13px">Loading…</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
+  try {
+    const f = S.serviceorders.filters;
+    const qs = new URLSearchParams();
+    if (f.status) qs.set('status', f.status);
+    if (f.technician) qs.set('technician', f.technician);
+    if (f.repair_type) qs.set('repair_type', f.repair_type);
+    if (f.search) qs.set('search', f.search);
+    const data = await api('GET', '/api/service-orders?' + qs.toString());
+    S.serviceorders.list = data.orders;
+    S.serviceorders.stats = data.stats;
+    _renderServiceOrdersList(data);
+  } catch (err) {
+    el.innerHTML = `<div class="alert alert-error">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+function _renderServiceOrdersList(data) {
+  const el = document.getElementById('screen-service-orders');
+  const { orders, stats, total } = data;
+  const f = S.serviceorders.filters;
+  const statCards = [
+    { label: 'Total', value: total, color: 'blue', key: '' },
+    { label: 'Open', value: stats['Open'] || 0, color: 'amber', key: 'Open' },
+    { label: 'In Progress', value: stats['In Progress'] || 0, color: 'blue', key: 'In Progress' },
+    { label: 'Completed', value: stats['Completed'] || 0, color: 'green', key: 'Completed' },
+  ].map(d => `
+    <div class="stat-card ${d.color}" style="cursor:pointer" onclick="S.serviceorders.filters.status='${d.key}';renderServiceOrders()">
+      <div class="stat-label">${d.label}</div>
+      <div class="stat-value">${d.value}</div>
+    </div>`).join('');
+
+  // Unique technicians for filter
+  const techs = [...new Set(S.serviceorders.list.map(o => o.assigned_technician).filter(Boolean))];
+
+  const rows = orders.length ? orders.map(o => `
+    <tr onclick="openServiceOrderDetail(${o.id})" style="cursor:pointer">
+      <td style="font-weight:600;color:var(--blue)">#${o.id}</td>
+      <td>${soStatusBadge(o.status)}</td>
+      <td>${fmtDate(o.date_created)}</td>
+      <td>${esc(o.customer_name || '—')}</td>
+      <td class="mono" style="font-size:12px">${esc(o.imei_serial || '—')}</td>
+      <td>${esc(o.repair_type || '—')}</td>
+      <td style="text-align:center;font-weight:600">${o.parts_count || 0}</td>
+      <td>${esc(o.assigned_technician || '—')}</td>
+      <td><button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openServiceOrderDetail(${o.id})">View</button></td>
+    </tr>`).join('')
+    : `<tr><td colspan="9"><div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg><p>No service orders found</p></div></td></tr>`;
+
+  el.innerHTML = `
+  <div class="screen-header" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div><h2>Service Orders</h2><p style="color:var(--muted);font-size:13px;margin-top:3px">${total} total</p></div>
+    <button class="btn btn-primary" onclick="openServiceOrderModal()">
+      <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New Service Order
+    </button>
+  </div>
+  <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">${statCards}</div>
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input type="text" class="search-input" placeholder="Search IMEI, customer…" value="${esc(f.search)}"
+        oninput="S.serviceorders.filters.search=this.value"
+        onkeydown="if(event.key==='Enter')renderServiceOrders()" style="width:220px">
+      <select onchange="S.serviceorders.filters.technician=this.value;renderServiceOrders()">
+        <option value="">All Technicians</option>
+        ${techs.map(t => `<option value="${esc(t)}" ${f.technician===t?'selected':''}>${esc(t)}</option>`).join('')}
+      </select>
+      <select onchange="S.serviceorders.filters.repair_type=this.value;renderServiceOrders()">
+        <option value="">All Repair Types</option>
+        ${REPAIR_TYPES.map(r => `<option value="${esc(r)}" ${f.repair_type===r?'selected':''}>${esc(r)}</option>`).join('')}
+      </select>
+      <select onchange="S.serviceorders.filters.status=this.value;renderServiceOrders()">
+        <option value="">All Statuses</option>
+        ${SO_STATUSES.map(s => `<option value="${esc(s)}" ${f.status===s?'selected':''}>${esc(s)}</option>`).join('')}
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="S.serviceorders.filters={status:'',technician:'',repair_type:'',search:''};renderServiceOrders()">Clear</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>SO #</th><th>Status</th><th>Date</th><th>Customer</th><th>IMEI/Serial</th>
+        <th>Repair Type</th><th style="text-align:center">Parts</th><th>Technician</th><th>Actions</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="table-foot">${total} record${total !== 1 ? 's' : ''}</div>
+  </div>`;
+}
+
+// ─── SO Parts — Inventory Search ───────────────────────────────────────────────
+// State: list of {part_sku, quantity, available_stock} being added to this SO
+let _soSelectedParts = [];
+
+function soPartsSearchHtml(existingParts = []) {
+  // seed from existing parts (edit mode)
+  _soSelectedParts = existingParts.map(p => ({ part_sku: p.part_sku, quantity: p.quantity || 1, available_stock: null }));
+  const typeOpts = PART_TYPES.map(t => `<option value="${t.code}">${t.code} — ${t.label}</option>`).join('');
+  const colorOpts = ['NA','Black','White','Silver','Gold','Rose Gold','Blue','Green','Purple','Red','Yellow']
+    .map(c => `<option value="${c}">${c}</option>`).join('');
+  const brandOpts = PARTS_DEVICE_BRANDS.map(b => `<option value="${esc(b)}">${esc(b)}</option>`).join('');
+  return `
+    <div style="background:#f8fafc;border:1.5px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px">🔍 Search Parts from Inventory</div>
+      <div class="form-grid form-grid-3" style="margin-bottom:10px">
+        <div class="form-group">
+          <label style="font-size:11px">Part Type</label>
+          <select id="sop-filter-type" onchange="soFilterBrandModel()">
+            <option value="">All Types</option>
+            ${typeOpts}
+          </select>
+        </div>
+        <div class="form-group">
+          <label style="font-size:11px">Quality</label>
+          <select id="sop-filter-quality" onchange="soSearchParts()">
+            <option value="">Any</option>
+            <option value="OEM">OEM</option>
+            <option value="Aftermarket">Aftermarket</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label style="font-size:11px">Color</label>
+          <select id="sop-filter-color" onchange="soSearchParts()">
+            <option value="">Any Color</option>
+            ${colorOpts}
+          </select>
+        </div>
+      </div>
+      <div class="form-grid form-grid-2" style="margin-bottom:10px">
+        <div class="form-group">
+          <label style="font-size:11px">Device Brand</label>
+          <select id="sop-filter-brand" onchange="soFilterBrandChanged()">
+            <option value="">All Brands</option>
+            ${brandOpts}
+          </select>
+        </div>
+        <div class="form-group">
+          <label style="font-size:11px">Model</label>
+          <select id="sop-filter-model" onchange="soSearchParts()">
+            <option value="">All Models</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:10px">
+        <label style="font-size:11px">Keyword / SKU search</label>
+        <input type="text" id="sop-filter-search" placeholder="e.g. iPhone 13, BTRY…"
+          oninput="clearTimeout(window._soSearchTimer);window._soSearchTimer=setTimeout(soSearchParts,300)"
+          style="width:100%">
+      </div>
+      <div id="sop-results" style="min-height:40px">
+        <p style="color:var(--muted);font-size:12px;text-align:center;padding:10px 0">Select filters or type to search parts with available stock</p>
+      </div>
+    </div>
+    <div id="sop-added-wrap">
+      ${_soSelectedPartsHtml()}
+    </div>`;
+}
+
+function soFilterBrandChanged() {
+  const brand = document.getElementById('sop-filter-brand')?.value || '';
+  const modelSel = document.getElementById('sop-filter-model');
+  if (!modelSel) return;
+  const models = reqModelsForBrand(brand);
+  modelSel.innerHTML = '<option value="">All Models</option>' +
+    models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  soSearchParts();
+}
+
+function soFilterBrandModel() {
+  soSearchParts();
+}
+
+async function soSearchParts() {
+  const type    = document.getElementById('sop-filter-type')?.value || '';
+  const quality = document.getElementById('sop-filter-quality')?.value || '';
+  const color   = document.getElementById('sop-filter-color')?.value || '';
+  const brand   = document.getElementById('sop-filter-brand')?.value || '';
+  const model   = document.getElementById('sop-filter-model')?.value || '';
+  const search  = document.getElementById('sop-filter-search')?.value?.trim() || '';
+  const resultsEl = document.getElementById('sop-results');
+  if (!resultsEl) return;
+
+  // Build query — combine model + brand into search if no keyword
+  const qs = new URLSearchParams();
+  if (type)   qs.set('part_type', type);
+  if (model)  qs.set('model', model);
+  else if (brand) qs.set('model', brand); // fallback: search by brand name in model field
+  if (search) qs.set('search', search);
+
+  resultsEl.innerHTML = '<p style="color:var(--muted);font-size:12px;text-align:center;padding:10px 0"><span class="loader" style="width:16px;height:16px;display:inline-block"></span> Searching…</p>';
+
+  try {
+    const data = await api('GET', '/api/parts-inventory?' + qs.toString());
+    let parts = (data.parts || []).filter(p => p.current_stock > 0);
+
+    // Client-side filter quality and color from SKU pattern (e.g. -OEM, -Black)
+    if (quality) parts = parts.filter(p => p.part_sku.toUpperCase().includes('-' + quality.toUpperCase()));
+    if (color && color !== 'NA') parts = parts.filter(p => p.part_sku.toLowerCase().includes('-' + color.toLowerCase()));
+    if (color === 'NA') parts = parts.filter(p => p.part_sku.includes('-NA-'));
+
+    if (!parts.length) {
+      resultsEl.innerHTML = '<p style="color:var(--muted);font-size:12px;text-align:center;padding:10px 0">No parts found in inventory with available stock.</p>';
+      return;
+    }
+
+    resultsEl.innerHTML = `
+      <div style="max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead style="position:sticky;top:0;background:#f1f5f9;z-index:1">
+            <tr>
+              <th style="padding:6px 8px;text-align:left;font-weight:600;color:var(--muted)">Part SKU</th>
+              <th style="padding:6px 8px;text-align:left;font-weight:600;color:var(--muted)">Model</th>
+              <th style="padding:6px 8px;text-align:center;font-weight:600;color:var(--muted)">In Stock</th>
+              <th style="padding:6px 8px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${parts.map(p => `
+              <tr style="border-top:1px solid var(--border)" onmouseenter="this.style.background='#f8fafc'" onmouseleave="this.style.background=''">
+                <td style="padding:7px 8px;font-family:monospace;font-size:11px">${esc(p.part_sku)}</td>
+                <td style="padding:7px 8px;color:var(--muted);font-size:11px">${esc(p.model_compatibility||'—')}</td>
+                <td style="padding:7px 8px;text-align:center">
+                  <span style="font-weight:700;color:${p.current_stock <= 2 ? '#b45309' : '#15803d'}">${p.current_stock}</span>
+                </td>
+                <td style="padding:7px 8px;text-align:right">
+                  <button class="btn btn-primary btn-sm" onclick="soAddInventoryPart('${esc(p.part_sku)}',${p.current_stock})">+ Add</button>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  } catch (err) {
+    resultsEl.innerHTML = `<p style="color:var(--red);font-size:12px;text-align:center;padding:10px 0">Error: ${esc(err.message)}</p>`;
+  }
+}
+
+function soAddInventoryPart(sku, availableStock) {
+  const existing = _soSelectedParts.find(p => p.part_sku === sku);
+  if (existing) {
+    existing.quantity = Math.min(existing.quantity + 1, availableStock);
+  } else {
+    _soSelectedParts.push({ part_sku: sku, quantity: 1, available_stock: availableStock });
+  }
+  document.getElementById('sop-added-wrap').innerHTML = _soSelectedPartsHtml();
+}
+
+function soRemoveSelectedPart(sku) {
+  _soSelectedParts = _soSelectedParts.filter(p => p.part_sku !== sku);
+  document.getElementById('sop-added-wrap').innerHTML = _soSelectedPartsHtml();
+}
+
+function soUpdateSelectedQty(sku, val) {
+  const part = _soSelectedParts.find(p => p.part_sku === sku);
+  if (part) part.quantity = Math.max(1, parseInt(val) || 1);
+}
+
+function _soSelectedPartsHtml() {
+  if (!_soSelectedParts.length) {
+    return `<div style="text-align:center;padding:14px;color:var(--muted);font-size:12px;border:1.5px dashed var(--border);border-radius:6px">No parts added yet — search above and click + Add</div>`;
+  }
+  const rows = _soSelectedParts.map(p => `
+    <tr>
+      <td style="padding:7px 8px;font-family:monospace;font-size:12px;font-weight:600">${esc(p.part_sku)}</td>
+      <td style="padding:7px 8px;text-align:center">
+        <input type="number" value="${p.quantity}" min="1" ${p.available_stock ? `max="${p.available_stock}"` : ''}
+          style="width:65px;text-align:center;border:1.5px solid var(--border);border-radius:var(--r);padding:4px 6px;font-size:13px"
+          onchange="soUpdateSelectedQty('${esc(p.part_sku)}',this.value)">
+      </td>
+      ${p.available_stock != null ? `<td style="padding:7px 8px;text-align:center;font-size:11px;color:var(--muted)">of ${p.available_stock}</td>` : '<td></td>'}
+      <td style="padding:7px 8px;text-align:right">
+        <button class="btn btn-danger btn-sm btn-icon" onclick="soRemoveSelectedPart('${esc(p.part_sku)}')">✕</button>
+      </td>
+    </tr>`).join('');
+  return `
+    <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px">Parts to Use (${_soSelectedParts.length})</div>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--border);border-radius:6px;overflow:hidden">
+      <thead style="background:#f8fafc">
+        <tr>
+          <th style="padding:6px 8px;text-align:left;font-size:11px;color:var(--muted);font-weight:600">Part SKU</th>
+          <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Qty</th>
+          <th style="padding:6px 8px;text-align:center;font-size:11px;color:var(--muted);font-weight:600">Available</th>
+          <th style="padding:6px 8px"></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function collectSOParts() {
+  // Collect from _soSelectedParts (which is kept in sync via soUpdateSelectedQty/soRemoveSelectedPart)
+  return _soSelectedParts
+    .filter(p => p.part_sku && p.quantity > 0)
+    .map(p => ({ part_sku: p.part_sku, quantity: p.quantity }));
+}
+
+function soFormHtml(so = {}, parts = []) {
+  const today = new Date().toISOString().slice(0, 10);
+  return `
+    <div class="form-section">
+      <div class="form-section-title">Order Details</div>
+      <div class="form-grid form-grid-2">
+        <div class="form-group">
+          <label>Date Created *</label>
+          <input type="date" id="so-date" value="${so.date_created ? so.date_created.slice(0,10) : today}">
+        </div>
+        <div class="form-group">
+          <label>Customer Name</label>
+          <input type="text" id="so-customer" value="${esc(so.customer_name || 'Tekhouz')}">
+        </div>
+        <div class="form-group">
+          <label>IMEI / Serial Number</label>
+          <input type="text" id="so-imei" value="${esc(so.imei_serial || '')}" placeholder="357500964474983">
+        </div>
+        <div class="form-group">
+          <label>Repair Type</label>
+          <select id="so-repair-type">
+            <option value="">— Select —</option>
+            ${REPAIR_TYPES.map(r => `<option value="${esc(r)}" ${so.repair_type===r?'selected':''}>${esc(r)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Assigned Technician</label>
+          <input type="text" id="so-tech" value="${esc(so.assigned_technician || (S.user?.username || ''))}">
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="so-status">
+            ${SO_STATUSES.map(s => `<option value="${esc(s)}" ${so.status===s?'selected':''}>${esc(s)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Warehouse Source</label>
+          <select id="so-warehouse">
+            ${WAREHOUSES.map(w => `<option value="${esc(w)}" ${so.warehouse_source===w?'selected':''}>${esc(w)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-top:10px">
+        <label>Issue Description</label>
+        <textarea id="so-issue" rows="2">${esc(so.issue_description || '')}</textarea>
+      </div>
+      <div class="form-group" style="margin-top:10px">
+        <label>Notes</label>
+        <textarea id="so-notes" rows="2">${esc(so.notes || '')}</textarea>
+      </div>
+    </div>
+    <div class="form-section">
+      <div class="form-section-title">Parts Used</div>
+      ${soPartsSearchHtml(parts)}
+    </div>`;
+}
+
+function openServiceOrderModal(prefill = {}) {
+  openModal(`
+    <div class="modal-header">
+      <h3>New Service Order</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">${soFormHtml()}</div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveNewSO()">Create Service Order</button>
+    </div>`);
+}
+
+async function saveNewSO() {
+  const date_created = document.getElementById('so-date')?.value;
+  const customer_name = document.getElementById('so-customer')?.value?.trim();
+  const imei_serial = document.getElementById('so-imei')?.value?.trim();
+  const issue_description = document.getElementById('so-issue')?.value?.trim();
+  const repair_type = document.getElementById('so-repair-type')?.value;
+  const assigned_technician = document.getElementById('so-tech')?.value?.trim();
+  const status = document.getElementById('so-status')?.value;
+  const warehouse_source = document.getElementById('so-warehouse')?.value;
+  const notes = document.getElementById('so-notes')?.value?.trim();
+  if (!date_created) return alert('Date Created is required.');
+  const parts = collectSOParts();
+  try {
+    const r = await api('POST', '/api/service-orders', { date_created, customer_name, imei_serial, issue_description, repair_type, assigned_technician, status, warehouse_source, notes, parts });
+    showToast('Service Order #' + r.id + ' created!');
+    closeModal();
+    renderServiceOrders();
+  } catch (err) { alert(err.message); }
+}
+
+async function openServiceOrderDetail(id) {
+  openModal(`<div class="modal-body" style="text-align:center;padding:40px"><div class="loader"></div></div>`);
+  try {
+    const so = await api('GET', '/api/service-orders/' + id);
+    const isAdmin = S.user?.role === 'admin';
+    openModal(`
+      <div class="modal-header">
+        <h3>Service Order #${so.id} ${soStatusBadge(so.status)}</h3>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body">${soFormHtml(so, so.parts || [])}</div>
+      <div class="modal-footer">
+        ${isAdmin ? `<button class="btn btn-danger" onclick="deleteSO(${so.id})">Delete</button>` : ''}
+        <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveSODetail(${so.id})">Save Changes</button>
+      </div>`);
+  } catch (err) { openModal(`<div class="modal-body"><div class="alert alert-error">${esc(err.message)}</div></div>`); }
+}
+
+async function saveSODetail(soId) {
+  const date_created = document.getElementById('so-date')?.value;
+  const customer_name = document.getElementById('so-customer')?.value?.trim();
+  const imei_serial = document.getElementById('so-imei')?.value?.trim();
+  const issue_description = document.getElementById('so-issue')?.value?.trim();
+  const repair_type = document.getElementById('so-repair-type')?.value;
+  const assigned_technician = document.getElementById('so-tech')?.value?.trim();
+  const status = document.getElementById('so-status')?.value;
+  const warehouse_source = document.getElementById('so-warehouse')?.value;
+  const notes = document.getElementById('so-notes')?.value?.trim();
+  if (!date_created) return alert('Date Created is required.');
+  const parts = collectSOParts();
+  try {
+    await api('PUT', '/api/service-orders/' + soId, { date_created, customer_name, imei_serial, issue_description, repair_type, assigned_technician, status, warehouse_source, notes, parts });
+    showToast('Service Order #' + soId + ' saved!');
+    closeModal();
+    renderServiceOrders();
+  } catch (err) { alert(err.message); }
+}
+
+async function deleteSO(id) {
+  if (!confirm(`Delete Service Order #${id}? This cannot be undone.`)) return;
+  try {
+    await api('DELETE', '/api/service-orders/' + id);
+    showToast('Service Order deleted.');
+    closeModal();
+    renderServiceOrders();
+  } catch (err) { alert(err.message); }
+}
+
+// ─── renderPartsInventory ───────────────────────────────────────────────────────
+async function renderPartsInventory() {
+  const el = document.getElementById('screen-parts-inventory');
+  el.innerHTML = `<div class="screen-header"><h2>Parts Inventory</h2><p style="color:var(--muted);font-size:13px">Loading…</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
+  try {
+    const f = S.partsinventory.filters;
+    const qs = new URLSearchParams();
+    if (f.category) qs.set('category', f.category);
+    if (f.part_type) qs.set('part_type', f.part_type);
+    if (f.search) qs.set('search', f.search);
+    const data = await api('GET', '/api/parts-inventory?' + qs.toString());
+    S.partsinventory.list = data.parts;
+    _renderPartsInventoryList(data);
+  } catch (err) {
+    el.innerHTML = `<div class="alert alert-error">Failed to load: ${esc(err.message)}</div>`;
+  }
+}
+
+function _renderPartsInventoryList(data) {
+  const el = document.getElementById('screen-parts-inventory');
+  const { parts, total, stats } = data;
+  const f = S.partsinventory.filters;
+
+  // Unique categories and types for filters
+  const categories = [...new Set(parts.map(p => p.part_category).filter(Boolean))];
+  const types = [...new Set(parts.map(p => p.part_type).filter(Boolean))];
+
+  const statCards = [
+    { label: 'Total Parts', value: total, color: 'blue' },
+    { label: 'Total Stock', value: stats.total_stock || 0, color: 'green' },
+    { label: 'Low Stock ≤2', value: stats.low_stock_count || 0, color: 'amber' },
+    { label: 'Out of Stock', value: stats.out_of_stock_count || 0, color: 'red' },
+  ].map(d => `
+    <div class="stat-card ${d.color}">
+      <div class="stat-label">${d.label}</div>
+      <div class="stat-value">${d.value}</div>
+    </div>`).join('');
+
+  const rows = parts.length ? parts.map(p => `
+    <tr>
+      <td class="mono" style="color:var(--blue);font-size:12px">${esc(p.part_sku)}</td>
+      <td>${p.part_type ? `<span class="badge badge-shipped">${esc(p.part_type)}</span>` : '—'}</td>
+      <td style="font-size:12px;color:var(--muted)">${esc(p.part_category || '—')}</td>
+      <td style="font-size:12px">${esc(p.model_compatibility || '—')}</td>
+      <td style="text-align:center;color:var(--muted)">${p.total_stock_in || 0}</td>
+      <td style="text-align:center;color:var(--muted)">${p.total_stock_out || 0}</td>
+      <td style="text-align:center">${stockLevelBadge(p.current_stock)}</td>
+      <td style="text-align:center;color:var(--blue)">${p.open_po_qty || 0}</td>
+      <td style="text-align:center;color:var(--amber)">${p.open_req_qty || 0}</td>
+    </tr>`).join('')
+    : `<tr><td colspan="9"><div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/></svg><p>No parts tracked yet. Create POs or Service Orders to populate inventory.</p></div></td></tr>`;
+
+  el.innerHTML = `
+  <div class="screen-header">
+    <h2>Parts Inventory</h2>
+    <p style="color:var(--muted);font-size:13px;margin-top:3px">Computed stock levels across all POs and Service Orders</p>
+  </div>
+  <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">${statCards}</div>
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <input type="text" class="search-input" placeholder="Search SKU or model…" value="${esc(f.search)}"
+        oninput="S.partsinventory.filters.search=this.value"
+        onkeydown="if(event.key==='Enter')renderPartsInventory()" style="width:220px">
+      <select onchange="S.partsinventory.filters.category=this.value;renderPartsInventory()">
+        <option value="">All Categories</option>
+        ${categories.map(c => `<option value="${esc(c)}" ${f.category===c?'selected':''}>${esc(c)}</option>`).join('')}
+      </select>
+      <select onchange="S.partsinventory.filters.part_type=this.value;renderPartsInventory()">
+        <option value="">All Types</option>
+        ${types.map(t => `<option value="${esc(t)}" ${f.part_type===t?'selected':''}>${esc(t)}</option>`).join('')}
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="S.partsinventory.filters={category:'',part_type:'',search:''};renderPartsInventory()">Clear</button>
+    </div>
+    <div class="toolbar-right">
+      <button class="btn btn-outline btn-sm" onclick="renderPartsInventory()">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg>
+        Refresh
+      </button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Part SKU</th><th>Type</th><th>Category</th><th>Model</th>
+        <th style="text-align:center">Total In</th><th style="text-align:center">Total Out</th>
+        <th style="text-align:center">Current Stock</th><th style="text-align:center">Open POs</th><th style="text-align:center">Open Reqs</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="table-foot">${total} part${total !== 1 ? 's' : ''} tracked</div>
+  </div>`;
 }

@@ -7,9 +7,33 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2/promise');
 
+const fs = require('fs');
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
+
+// Multer for XLSX imports (memory)
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+
+// Multer for return media (disk storage)
+const MEDIA_DIR = path.join(__dirname, 'public', 'uploads', 'returns');
+if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
+
+const mediaStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, MEDIA_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `ret-${req.params.id}-${Date.now()}-${Math.random().toString(36).slice(2,7)}${ext}`);
+  }
+});
+const mediaUpload = multer({
+  storage: mediaStorage,
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB max per file
+  fileFilter: (req, file, cb) => {
+    const allowed = /^(image|video)\//;
+    if (allowed.test(file.mimetype)) cb(null, true);
+    else cb(new Error('Only images and videos are allowed'));
+  }
+});
 
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -324,6 +348,161 @@ async function initDB() {
       FOREIGN KEY (po_id) REFERENCES purchase_orders(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS returns (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      return_from VARCHAR(100),
+      order_id VARCHAR(255),
+      sku VARCHAR(500),
+      customer_name VARCHAR(255),
+      return_date DATE,
+      device_config_sent TEXT,
+      return_reason VARCHAR(255),
+      customer_complaint TEXT,
+      tracking_number VARCHAR(255),
+      status VARCHAR(50) DEFAULT 'awaiting_shipment',
+      received_date DATE,
+      device_config_received TEXT,
+      condition_received VARCHAR(100),
+      charger_included VARCHAR(10),
+      lcd_test VARCHAR(50) DEFAULT 'Not Tested',
+      touch_test VARCHAR(50) DEFAULT 'Not Tested',
+      battery_health INT,
+      face_id_test VARCHAR(50) DEFAULT 'Not Tested',
+      fingerprint_test VARCHAR(50) DEFAULT 'Not Tested',
+      front_camera_test VARCHAR(50) DEFAULT 'Not Tested',
+      rear_camera_test VARCHAR(50) DEFAULT 'Not Tested',
+      speaker_test VARCHAR(50) DEFAULT 'Not Tested',
+      mic_test VARCHAR(50) DEFAULT 'Not Tested',
+      wifi_test VARCHAR(50) DEFAULT 'Not Tested',
+      cellular_test VARCHAR(50) DEFAULT 'Not Tested',
+      charging_test VARCHAR(50) DEFAULT 'Not Tested',
+      grade VARCHAR(20),
+      tech_notes TEXT,
+      tested_by VARCHAR(255),
+      test_date DATE,
+      next_action VARCHAR(100),
+      ops_status VARCHAR(50),
+      warehouse_status VARCHAR(50),
+      resell_action VARCHAR(100),
+      final_action VARCHAR(100),
+      ops_notes TEXT,
+      ops_reviewed_by VARCHAR(255),
+      ops_review_date DATE,
+      created_by VARCHAR(255),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS return_media (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      return_id INT NOT NULL,
+      filename VARCHAR(500) NOT NULL,
+      original_name VARCHAR(500),
+      mimetype VARCHAR(100),
+      size BIGINT DEFAULT 0,
+      uploaded_by VARCHAR(255),
+      caption TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (return_id) REFERENCES returns(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS part_requisitions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      request_date DATE NOT NULL,
+      requested_by VARCHAR(255) NOT NULL,
+      part_type VARCHAR(50),
+      part_category VARCHAR(100),
+      model_compatibility VARCHAR(255),
+      part_sku VARCHAR(500),
+      color VARCHAR(100) DEFAULT 'NA',
+      quality VARCHAR(50) DEFAULT 'OEM',
+      quantity_needed INT DEFAULT 1,
+      actual_ordered INT,
+      priority VARCHAR(50) DEFAULT 'Normal',
+      status VARCHAR(50) DEFAULT 'Requested',
+      warehouse_location VARCHAR(255),
+      notes TEXT,
+      po_id INT,
+      created_by VARCHAR(255),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // ─── Parts PO Tables ───────────────────────────────────────────────────────
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS parts_pos (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      vendor VARCHAR(255) NOT NULL,
+      order_date DATE NOT NULL,
+      expected_delivery DATE,
+      warehouse_destination VARCHAR(255) DEFAULT 'Milpitas 741',
+      status VARCHAR(50) DEFAULT 'Open',
+      notes TEXT,
+      requisition_id INT,
+      created_by VARCHAR(255),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS parts_po_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      po_id INT NOT NULL,
+      part_sku VARCHAR(500) NOT NULL,
+      part_type VARCHAR(20),
+      part_category VARCHAR(100),
+      model_compatibility VARCHAR(500),
+      quantity_ordered INT DEFAULT 1,
+      received_quantity INT DEFAULT 0,
+      unit_price DECIMAL(10,2) DEFAULT 0,
+      notes TEXT,
+      FOREIGN KEY (po_id) REFERENCES parts_pos(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS service_orders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      date_created DATE NOT NULL,
+      customer_name VARCHAR(255) DEFAULT 'Tekhouz',
+      imei_serial VARCHAR(255),
+      issue_description TEXT,
+      repair_type VARCHAR(100),
+      assigned_technician VARCHAR(255),
+      status VARCHAR(50) DEFAULT 'Open',
+      warehouse_source VARCHAR(255) DEFAULT 'Milpitas 741',
+      notes TEXT,
+      created_by VARCHAR(255),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS service_order_parts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      service_order_id INT NOT NULL,
+      part_sku VARCHAR(500) NOT NULL,
+      part_type VARCHAR(20),
+      model_compatibility VARCHAR(255),
+      quantity INT DEFAULT 1,
+      notes TEXT,
+      FOREIGN KEY (service_order_id) REFERENCES service_orders(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  // Migrate: add sku column to returns if missing
+  try {
+    await pool.query(`ALTER TABLE returns ADD COLUMN sku VARCHAR(500) AFTER order_id`);
+  } catch (e) { /* column already exists */ }
 
   // Backfill device_type for daily_orders rows where device_type IS NULL OR device_type = 'Other'
   try {
@@ -1475,6 +1654,648 @@ app.post('/api/purchase-orders/:id/import-items', auth, upload.single('file'), a
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Parts POs ────────────────────────────────────────────────────────────────
+
+// Helper: recompute PO status from its items
+async function recalcPoStatus(poId) {
+  const items = await dbAll('SELECT quantity_ordered, received_quantity FROM parts_po_items WHERE po_id = ?', [poId]);
+  const po = await dbGet('SELECT status FROM parts_pos WHERE id = ?', [poId]);
+  if (!po || po.status === 'Cancelled') return;
+  let newStatus = 'Open';
+  if (items.length > 0) {
+    const allReceived = items.every(i => (i.received_quantity || 0) >= (i.quantity_ordered || 1));
+    const anyReceived = items.some(i => (i.received_quantity || 0) > 0);
+    if (allReceived) newStatus = 'Closed';
+    else if (anyReceived) newStatus = 'Partial';
+    else newStatus = 'Open';
+  }
+  await dbRun('UPDATE parts_pos SET status = ?, updated_at = NOW() WHERE id = ?', [newStatus, poId]);
+  return newStatus;
+}
+
+// GET /api/parts-pos
+app.get('/api/parts-pos', auth, async (req, res) => {
+  try {
+    const { status, vendor, search } = req.query;
+    let sql = `SELECT pp.*,
+                      COUNT(ppi.id)                                              AS item_count,
+                      COALESCE(SUM(ppi.quantity_ordered), 0)                     AS total_ordered,
+                      COALESCE(SUM(ppi.received_quantity), 0)                    AS total_received,
+                      COALESCE(SUM(ppi.quantity_ordered * ppi.unit_price), 0)    AS total_amount
+               FROM parts_pos pp
+               LEFT JOIN parts_po_items ppi ON ppi.po_id = pp.id
+               WHERE 1=1`;
+    const params = [];
+    if (status) { sql += ' AND pp.status = ?'; params.push(status); }
+    if (vendor) { sql += ' AND pp.vendor = ?'; params.push(vendor); }
+    if (search) {
+      sql += ' AND (pp.vendor LIKE ? OR pp.id LIKE ?)';
+      const q = '%' + search + '%';
+      params.push(q, q);
+    }
+    sql += ' GROUP BY pp.id ORDER BY pp.created_at DESC';
+    const pos = await dbAll(sql, params);
+    const stats = await dbAll('SELECT status, COUNT(*) as cnt FROM parts_pos GROUP BY status');
+    const statsMap = {};
+    stats.forEach(s => { statsMap[s.status] = s.cnt; });
+    res.json({ pos, stats: statsMap, total: pos.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/parts-pos
+app.post('/api/parts-pos', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const poId = await dbTx(async (conn) => {
+      const [r] = await conn.query(
+        `INSERT INTO parts_pos (vendor, order_date, expected_delivery, warehouse_destination, notes, requisition_id, created_by)
+         VALUES (?,?,?,?,?,?,?)`,
+        [b.vendor, b.order_date, b.expected_delivery || null, b.warehouse_destination || 'Milpitas 741', b.notes || null, b.requisition_id || null, req.user.username]
+      );
+      const newId = r.insertId;
+      if (b.items && b.items.length > 0) {
+        for (const it of b.items) {
+          await conn.query(
+            `INSERT INTO parts_po_items (po_id, part_sku, part_type, part_category, model_compatibility, quantity_ordered, received_quantity, unit_price, notes)
+             VALUES (?,?,?,?,?,?,?,?,?)`,
+            [newId, it.part_sku, it.part_type || null, it.part_category || null, it.model_compatibility || null, it.quantity_ordered || 1, it.received_quantity || 0, it.unit_price || 0, it.notes || null]
+          );
+        }
+      }
+      return newId;
+    });
+    await recalcPoStatus(poId);
+    res.json({ id: poId, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/parts-pos/:id
+app.get('/api/parts-pos/:id', auth, async (req, res) => {
+  try {
+    const po = await dbGet('SELECT * FROM parts_pos WHERE id = ?', [req.params.id]);
+    if (!po) return res.status(404).json({ error: 'Not found' });
+    const items = await dbAll('SELECT * FROM parts_po_items WHERE po_id = ?', [req.params.id]);
+    res.json({ ...po, items });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/parts-pos/:id
+app.put('/api/parts-pos/:id', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    await dbRun(
+      `UPDATE parts_pos SET vendor=?, order_date=?, expected_delivery=?, warehouse_destination=?, notes=?, updated_at=NOW()
+       WHERE id=?`,
+      [b.vendor, b.order_date, b.expected_delivery || null, b.warehouse_destination || 'Milpitas 741', b.notes || null, req.params.id]
+    );
+    if (b.status === 'Cancelled') {
+      await dbRun('UPDATE parts_pos SET status=? WHERE id=?', ['Cancelled', req.params.id]);
+    } else {
+      await recalcPoStatus(req.params.id);
+    }
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/parts-pos/:id/items
+app.post('/api/parts-pos/:id/items', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const r = await dbRun(
+      `INSERT INTO parts_po_items (po_id, part_sku, part_type, part_category, model_compatibility, quantity_ordered, received_quantity, unit_price, notes)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [req.params.id, b.part_sku, b.part_type || null, b.part_category || null, b.model_compatibility || null, b.quantity_ordered || 1, b.received_quantity || 0, b.unit_price || 0, b.notes || null]
+    );
+    await recalcPoStatus(req.params.id);
+    res.json({ id: r.insertId, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/parts-pos/:id/items/:itemId
+app.put('/api/parts-pos/:id/items/:itemId', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    await dbRun(
+      `UPDATE parts_po_items SET part_sku=?, part_type=?, part_category=?, model_compatibility=?, quantity_ordered=?, received_quantity=?, unit_price=?, notes=?
+       WHERE id=? AND po_id=?`,
+      [b.part_sku, b.part_type || null, b.part_category || null, b.model_compatibility || null, b.quantity_ordered || 1, b.received_quantity || 0, b.unit_price || 0, b.notes || null, req.params.itemId, req.params.id]
+    );
+    await recalcPoStatus(req.params.id);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/parts-pos/:id/items/:itemId
+app.delete('/api/parts-pos/:id/items/:itemId', auth, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM parts_po_items WHERE id=? AND po_id=?', [req.params.itemId, req.params.id]);
+    await recalcPoStatus(req.params.id);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/parts-pos/:id
+app.delete('/api/parts-pos/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM parts_pos WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/parts-pos/:id/receive  — bulk receive items, auto-update PO status
+app.post('/api/parts-pos/:id/receive', auth, async (req, res) => {
+  try {
+    const poId = req.params.id;
+    const { items } = req.body; // [{ id, received_quantity }]
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: 'No items provided' });
+
+    await dbTx(async (conn) => {
+      for (const it of items) {
+        await conn.query(
+          `UPDATE parts_po_items SET received_quantity = ? WHERE id = ? AND po_id = ?`,
+          [parseInt(it.received_quantity) || 0, it.id, poId]
+        );
+      }
+    });
+
+    const newStatus = await recalcPoStatus(poId);
+    res.json({ success: true, status: newStatus });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/parts-pos/from-requisition/:reqId
+app.post('/api/parts-pos/from-requisition/:reqId', auth, async (req, res) => {
+  try {
+    const req2 = await dbGet('SELECT * FROM part_requisitions WHERE id = ?', [req.params.reqId]);
+    if (!req2) return res.status(404).json({ error: 'Requisition not found' });
+    const vendor = req.body.vendor || 'Unknown';
+    const expectedDelivery = req.body.expected_delivery || null;
+    const today = new Date().toISOString().slice(0, 10);
+    const poId = await dbTx(async (conn) => {
+      const [r] = await conn.query(
+        `INSERT INTO parts_pos (vendor, order_date, expected_delivery, warehouse_destination, notes, requisition_id, created_by)
+         VALUES (?,?,?,?,?,?,?)`,
+        [vendor, today, expectedDelivery, req2.warehouse_location || 'Milpitas 741', `From Requisition #${req2.id}`, req2.id, req.user.username]
+      );
+      const newId = r.insertId;
+      await conn.query(
+        `INSERT INTO parts_po_items (po_id, part_sku, part_type, part_category, model_compatibility, quantity_ordered, received_quantity, unit_price)
+         VALUES (?,?,?,?,?,?,0,0)`,
+        [newId, req2.part_sku || 'UNKNOWN', req2.part_type || null, req2.part_category || null, req2.model_compatibility || null, req2.quantity_needed || 1]
+      );
+      await conn.query(`UPDATE part_requisitions SET status='Converted to PO', po_id=?, updated_at=NOW() WHERE id=?`, [newId, req2.id]);
+      return newId;
+    });
+    res.json({ id: poId, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Service Orders ────────────────────────────────────────────────────────────
+
+// GET /api/service-orders
+app.get('/api/service-orders', auth, async (req, res) => {
+  try {
+    const { status, technician, repair_type, search } = req.query;
+    let sql = `SELECT so.*, COUNT(sop.id) as parts_count
+               FROM service_orders so
+               LEFT JOIN service_order_parts sop ON sop.service_order_id = so.id
+               WHERE 1=1`;
+    const params = [];
+    if (status) { sql += ' AND so.status = ?'; params.push(status); }
+    if (technician) { sql += ' AND so.assigned_technician = ?'; params.push(technician); }
+    if (repair_type) { sql += ' AND so.repair_type = ?'; params.push(repair_type); }
+    if (search) {
+      sql += ' AND (so.imei_serial LIKE ? OR so.customer_name LIKE ? OR so.id LIKE ?)';
+      const q = '%' + search + '%';
+      params.push(q, q, q);
+    }
+    sql += ' GROUP BY so.id ORDER BY so.created_at DESC';
+    const orders = await dbAll(sql, params);
+    const stats = await dbAll('SELECT status, COUNT(*) as cnt FROM service_orders GROUP BY status');
+    const statsMap = {};
+    stats.forEach(s => { statsMap[s.status] = s.cnt; });
+    res.json({ orders, stats: statsMap, total: orders.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/service-orders
+app.post('/api/service-orders', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const soId = await dbTx(async (conn) => {
+      const [r] = await conn.query(
+        `INSERT INTO service_orders (date_created, customer_name, imei_serial, issue_description, repair_type, assigned_technician, status, warehouse_source, notes, created_by)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [b.date_created, b.customer_name || 'Tekhouz', b.imei_serial || null, b.issue_description || null, b.repair_type || null, b.assigned_technician || null, b.status || 'Open', b.warehouse_source || 'Milpitas 741', b.notes || null, req.user.username]
+      );
+      const newId = r.insertId;
+      if (b.parts && b.parts.length > 0) {
+        for (const p of b.parts) {
+          await conn.query(
+            `INSERT INTO service_order_parts (service_order_id, part_sku, part_type, model_compatibility, quantity, notes)
+             VALUES (?,?,?,?,?,?)`,
+            [newId, p.part_sku, p.part_type || null, p.model_compatibility || null, p.quantity || 1, p.notes || null]
+          );
+        }
+      }
+      return newId;
+    });
+    res.json({ id: soId, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/service-orders/:id
+app.get('/api/service-orders/:id', auth, async (req, res) => {
+  try {
+    const so = await dbGet('SELECT * FROM service_orders WHERE id = ?', [req.params.id]);
+    if (!so) return res.status(404).json({ error: 'Not found' });
+    const parts = await dbAll('SELECT * FROM service_order_parts WHERE service_order_id = ?', [req.params.id]);
+    res.json({ ...so, parts });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/service-orders/:id
+app.put('/api/service-orders/:id', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    await dbTx(async (conn) => {
+      await conn.query(
+        `UPDATE service_orders SET date_created=?, customer_name=?, imei_serial=?, issue_description=?, repair_type=?, assigned_technician=?, status=?, warehouse_source=?, notes=?, updated_at=NOW()
+         WHERE id=?`,
+        [b.date_created, b.customer_name || 'Tekhouz', b.imei_serial || null, b.issue_description || null, b.repair_type || null, b.assigned_technician || null, b.status || 'Open', b.warehouse_source || 'Milpitas 741', b.notes || null, req.params.id]
+      );
+      await conn.query('DELETE FROM service_order_parts WHERE service_order_id = ?', [req.params.id]);
+      if (b.parts && b.parts.length > 0) {
+        for (const p of b.parts) {
+          await conn.query(
+            `INSERT INTO service_order_parts (service_order_id, part_sku, part_type, model_compatibility, quantity, notes)
+             VALUES (?,?,?,?,?,?)`,
+            [req.params.id, p.part_sku, p.part_type || null, p.model_compatibility || null, p.quantity || 1, p.notes || null]
+          );
+        }
+      }
+    });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/service-orders/:id
+app.delete('/api/service-orders/:id', auth, adminOnly, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM service_orders WHERE id = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Parts Inventory ───────────────────────────────────────────────────────────
+
+// GET /api/parts-inventory
+app.get('/api/parts-inventory', auth, async (req, res) => {
+  try {
+    const { category, part_type, model, search } = req.query;
+    // Get all unique SKUs with meta from PO items (primary source)
+    const skuRows = await dbAll(`
+      SELECT part_sku,
+             MAX(part_type) as part_type,
+             MAX(part_category) as part_category,
+             MAX(model_compatibility) as model_compatibility
+      FROM parts_po_items GROUP BY part_sku
+      UNION
+      SELECT part_sku,
+             MAX(part_type) as part_type,
+             NULL as part_category,
+             MAX(model_compatibility) as model_compatibility
+      FROM service_order_parts GROUP BY part_sku
+    `);
+    // Collapse duplicates (same sku from both tables)
+    const skuMap = {};
+    for (const r of skuRows) {
+      if (!skuMap[r.part_sku]) skuMap[r.part_sku] = r;
+      else {
+        // prefer non-null values
+        if (!skuMap[r.part_sku].part_type && r.part_type) skuMap[r.part_sku].part_type = r.part_type;
+        if (!skuMap[r.part_sku].part_category && r.part_category) skuMap[r.part_sku].part_category = r.part_category;
+        if (!skuMap[r.part_sku].model_compatibility && r.model_compatibility) skuMap[r.part_sku].model_compatibility = r.model_compatibility;
+      }
+    }
+    // Aggregated stock in
+    const stockIn = await dbAll(`
+      SELECT ppi.part_sku, SUM(ppi.received_quantity) as received_quantity
+      FROM parts_po_items ppi
+      JOIN parts_pos pp ON pp.id = ppi.po_id AND pp.status != 'Cancelled'
+      GROUP BY ppi.part_sku`);
+    const inMap = {};
+    stockIn.forEach(r => { inMap[r.part_sku] = r.received_quantity || 0; });
+    // Aggregated stock out
+    const stockOut = await dbAll(`SELECT part_sku, SUM(quantity) as qty FROM service_order_parts GROUP BY part_sku`);
+    const outMap = {};
+    stockOut.forEach(r => { outMap[r.part_sku] = r.qty || 0; });
+    // Open PO quantities
+    const openPO = await dbAll(`
+      SELECT i.part_sku, SUM(i.quantity_ordered - i.received_quantity) as qty
+      FROM parts_po_items i JOIN parts_pos pos ON pos.id = i.po_id
+      WHERE pos.status IN ('Open','Partial') GROUP BY i.part_sku`);
+    const openPOMap = {};
+    openPO.forEach(r => { openPOMap[r.part_sku] = r.qty || 0; });
+    // Open requisition quantities
+    const openReq = await dbAll(`SELECT part_sku, SUM(quantity_needed) as qty FROM part_requisitions WHERE status IN ('Requested','Approved') GROUP BY part_sku`);
+    const openReqMap = {};
+    openReq.forEach(r => { openReqMap[r.part_sku] = r.qty || 0; });
+
+    let parts = Object.values(skuMap).map(p => ({
+      part_sku: p.part_sku,
+      part_type: p.part_type,
+      part_category: p.part_category,
+      model_compatibility: p.model_compatibility,
+      total_stock_in: inMap[p.part_sku] || 0,
+      total_stock_out: outMap[p.part_sku] || 0,
+      current_stock: (inMap[p.part_sku] || 0) - (outMap[p.part_sku] || 0),
+      open_po_qty: openPOMap[p.part_sku] || 0,
+      open_req_qty: openReqMap[p.part_sku] || 0,
+    }));
+
+    // Apply filters in JS (already have all data)
+    if (category)   parts = parts.filter(p => p.part_category === category);
+    if (part_type)  parts = parts.filter(p => p.part_type === part_type);
+    if (model)      parts = parts.filter(p => (p.model_compatibility || '').toLowerCase().includes(model.toLowerCase()));
+    if (search) {
+      const q = search.toLowerCase();
+      parts = parts.filter(p => (p.part_sku || '').toLowerCase().includes(q) || (p.model_compatibility || '').toLowerCase().includes(q));
+    }
+    parts.sort((a, b) => a.part_sku.localeCompare(b.part_sku));
+
+    const total = parts.length;
+    const total_stock = parts.reduce((s, p) => s + (p.current_stock || 0), 0);
+    const low_stock_count = parts.filter(p => p.current_stock > 0 && p.current_stock <= 2).length;
+    const out_of_stock_count = parts.filter(p => p.current_stock <= 0).length;
+    res.json({ parts, total, stats: { total_stock, low_stock_count, out_of_stock_count } });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Returns ──────────────────────────────────────────────────────────────────
+
+// GET /api/returns — list with optional filters
+app.get('/api/returns', auth, async (req, res) => {
+  try {
+    const { status, return_from, search, from, to } = req.query;
+    let sql = 'SELECT * FROM returns WHERE 1=1';
+    const params = [];
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    if (return_from) { sql += ' AND return_from = ?'; params.push(return_from); }
+    if (from) { sql += ' AND (return_date >= ? OR created_at >= ?)'; params.push(from, from); }
+    if (to) { sql += ' AND (return_date <= ? OR DATE(created_at) <= ?)'; params.push(to, to); }
+    if (search) {
+      sql += ' AND (order_id LIKE ? OR customer_name LIKE ? OR device_config_sent LIKE ? OR tracking_number LIKE ?)';
+      const q = '%' + search + '%';
+      params.push(q, q, q, q);
+    }
+    sql += ' ORDER BY created_at DESC';
+    const rows = await dbAll(sql, params);
+
+    // Stats
+    const stats = await dbAll(`
+      SELECT status, COUNT(*) as cnt FROM returns GROUP BY status
+    `);
+    const statusMap = {};
+    stats.forEach(s => { statusMap[s.status] = s.cnt; });
+
+    res.json({ returns: rows, stats: statusMap, total: rows.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/returns/:id — detail
+app.get('/api/returns/:id', auth, async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM returns WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/returns — create intake
+app.post('/api/returns', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const result = await dbRun(
+      `INSERT INTO returns (return_from, order_id, sku, customer_name, return_date, device_config_sent,
+        return_reason, customer_complaint, tracking_number, status, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        b.return_from || null,
+        b.order_id || null,
+        b.sku || null,
+        b.customer_name || null,
+        b.return_date || null,
+        b.device_config_sent || null,
+        b.return_reason || null,
+        b.customer_complaint || null,
+        b.tracking_number || null,
+        b.status || 'awaiting_shipment',
+        req.user.username
+      ]
+    );
+    const row = await dbGet('SELECT * FROM returns WHERE id = ?', [result.insertId]);
+    res.json(row);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// PUT /api/returns/:id — update (intake, testing, or ops fields)
+app.put('/api/returns/:id', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const existing = await dbGet('SELECT id FROM returns WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+
+    await dbRun(
+      `UPDATE returns SET
+        return_from=?, order_id=?, sku=?, customer_name=?, return_date=?, device_config_sent=?,
+        return_reason=?, customer_complaint=?, tracking_number=?, status=?,
+        received_date=?, device_config_received=?, condition_received=?, charger_included=?,
+        lcd_test=?, touch_test=?, battery_health=?, face_id_test=?, fingerprint_test=?,
+        front_camera_test=?, rear_camera_test=?, speaker_test=?, mic_test=?,
+        wifi_test=?, cellular_test=?, charging_test=?,
+        grade=?, tech_notes=?, tested_by=?, test_date=?,
+        next_action=?, ops_status=?, warehouse_status=?, resell_action=?,
+        final_action=?, ops_notes=?, ops_reviewed_by=?, ops_review_date=?
+       WHERE id=?`,
+      [
+        b.return_from || null, b.order_id || null, b.sku || null, b.customer_name || null,
+        b.return_date || null, b.device_config_sent || null,
+        b.return_reason || null, b.customer_complaint || null,
+        b.tracking_number || null, b.status || null,
+        b.received_date || null, b.device_config_received || null,
+        b.condition_received || null, b.charger_included || null,
+        b.lcd_test || 'Not Tested', b.touch_test || 'Not Tested',
+        b.battery_health ? parseInt(b.battery_health) : null,
+        b.face_id_test || 'Not Tested', b.fingerprint_test || 'Not Tested',
+        b.front_camera_test || 'Not Tested', b.rear_camera_test || 'Not Tested',
+        b.speaker_test || 'Not Tested', b.mic_test || 'Not Tested',
+        b.wifi_test || 'Not Tested', b.cellular_test || 'Not Tested',
+        b.charging_test || 'Not Tested',
+        b.grade || null, b.tech_notes || null, b.tested_by || null, b.test_date || null,
+        b.next_action || null, b.ops_status || null, b.warehouse_status || null,
+        b.resell_action || null, b.final_action || null,
+        b.ops_notes || null, b.ops_reviewed_by || null, b.ops_review_date || null,
+        req.params.id
+      ]
+    );
+    const row = await dbGet('SELECT * FROM returns WHERE id = ?', [req.params.id]);
+    res.json(row);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/returns/:id — admin only
+app.delete('/api/returns/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const result = await dbRun('DELETE FROM returns WHERE id = ?', [req.params.id]);
+    if (!result.affectedRows) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Part Requisitions ────────────────────────────────────────────────────────
+
+app.get('/api/requisitions', auth, async (req, res) => {
+  try {
+    const { status, priority, part_category, search } = req.query;
+    let sql = 'SELECT * FROM part_requisitions WHERE 1=1';
+    const params = [];
+    if (status) { sql += ' AND status = ?'; params.push(status); }
+    if (priority) { sql += ' AND priority = ?'; params.push(priority); }
+    if (part_category) { sql += ' AND part_category = ?'; params.push(part_category); }
+    if (search) {
+      sql += ' AND (part_sku LIKE ? OR model_compatibility LIKE ? OR requested_by LIKE ? OR part_category LIKE ?)';
+      const q = '%' + search + '%';
+      params.push(q, q, q, q);
+    }
+    sql += ' ORDER BY FIELD(priority,"Urgent","Normal","Low"), created_at DESC';
+    const rows = await dbAll(sql, params);
+    const stats = await dbAll('SELECT status, COUNT(*) as cnt FROM part_requisitions GROUP BY status');
+    const statusMap = {};
+    stats.forEach(s => { statusMap[s.status] = s.cnt; });
+    res.json({ requisitions: rows, stats: statusMap, total: rows.length });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/requisitions/:id', auth, async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM part_requisitions WHERE id = ?', [req.params.id]);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/requisitions', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const result = await dbRun(
+      `INSERT INTO part_requisitions (request_date, requested_by, part_type, part_category, model_compatibility, part_sku, color, quality, quantity_needed, actual_ordered, priority, status, warehouse_location, notes, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [b.request_date||null, b.requested_by||null, b.part_type||null, b.part_category||null, b.model_compatibility||null, b.part_sku||null, b.color||'NA', b.quality||'OEM', parseInt(b.quantity_needed)||1, b.actual_ordered?parseInt(b.actual_ordered):null, b.priority||'Normal', b.status||'Requested', b.warehouse_location||null, b.notes||null, req.user.username]
+    );
+    const row = await dbGet('SELECT * FROM part_requisitions WHERE id = ?', [result.insertId]);
+    res.json(row);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/requisitions/:id', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const existing = await dbGet('SELECT id FROM part_requisitions WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    await dbRun(
+      `UPDATE part_requisitions SET request_date=?, requested_by=?, part_type=?, part_category=?, model_compatibility=?, part_sku=?, color=?, quality=?, quantity_needed=?, actual_ordered=?, priority=?, status=?, warehouse_location=?, notes=? WHERE id=?`,
+      [b.request_date||null, b.requested_by||null, b.part_type||null, b.part_category||null, b.model_compatibility||null, b.part_sku||null, b.color||'NA', b.quality||'OEM', parseInt(b.quantity_needed)||1, b.actual_ordered?parseInt(b.actual_ordered):null, b.priority||'Normal', b.status||'Requested', b.warehouse_location||null, b.notes||null, req.params.id]
+    );
+    const row = await dbGet('SELECT * FROM part_requisitions WHERE id = ?', [req.params.id]);
+    res.json(row);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/requisitions/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const result = await dbRun('DELETE FROM part_requisitions WHERE id = ?', [req.params.id]);
+    if (!result.affectedRows) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Return Media ─────────────────────────────────────────────────────────────
+
+// GET /api/returns/:id/media — list media for a return
+app.get('/api/returns/:id/media', auth, async (req, res) => {
+  try {
+    const rows = await dbAll(
+      'SELECT * FROM return_media WHERE return_id = ? ORDER BY created_at ASC',
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/returns/:id/media — upload one or more files
+app.post('/api/returns/:id/media', auth, (req, res, next) => {
+  mediaUpload.array('files', 20)(req, res, err => {
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const returnId = parseInt(req.params.id);
+    const existing = await dbGet('SELECT id FROM returns WHERE id = ?', [returnId]);
+    if (!existing) return res.status(404).json({ error: 'Return not found' });
+
+    if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files uploaded' });
+
+    const inserted = [];
+    for (const f of req.files) {
+      const result = await dbRun(
+        `INSERT INTO return_media (return_id, filename, original_name, mimetype, size, uploaded_by, caption)
+         VALUES (?,?,?,?,?,?,?)`,
+        [returnId, f.filename, f.originalname, f.mimetype, f.size, req.user.username, req.body.caption || null]
+      );
+      inserted.push({
+        id: result.insertId,
+        return_id: returnId,
+        filename: f.filename,
+        original_name: f.originalname,
+        mimetype: f.mimetype,
+        size: f.size,
+        uploaded_by: req.user.username,
+        url: `/uploads/returns/${f.filename}`
+      });
+    }
+    res.json({ uploaded: inserted.length, files: inserted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/returns/media/:mediaId/caption — update caption
+app.patch('/api/returns/media/:mediaId/caption', auth, async (req, res) => {
+  try {
+    await dbRun('UPDATE return_media SET caption = ? WHERE id = ?', [req.body.caption || null, req.params.mediaId]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/returns/media/:mediaId — delete a media file
+app.delete('/api/returns/media/:mediaId', auth, async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM return_media WHERE id = ?', [req.params.mediaId]);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    // Only uploader or admin can delete
+    if (row.uploaded_by !== req.user.username && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    // Remove file from disk
+    const filePath = path.join(MEDIA_DIR, row.filename);
+    try { fs.unlinkSync(filePath); } catch {}
+    await dbRun('DELETE FROM return_media WHERE id = ?', [req.params.mediaId]);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
