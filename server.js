@@ -48,6 +48,25 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { error: 'Too m
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ─── PUBLIC SHOP INVENTORY CORS (NEW) ──────────────────────────────────────
+// Only allows your shop domain(s) to call /api/shop/* routes. No auth needed
+// for these routes since they're meant to be hit from the public shop site.
+const SHOP_ALLOWED_ORIGINS = [
+  'https://shop.tekhouz.com',
+  'https://tekhouz.com',
+  'http://localhost:3000'
+];
+app.use('/api/shop', (req, res, next) => {
+  const origin = req.headers.origin;
+  if (SHOP_ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 // ─── MySQL Connection Pool ────────────────────────────────────────────────────
 function buildPoolConfig() {
   const MYSQL_URL = process.env.MYSQL_URL;
@@ -157,6 +176,57 @@ function gNum(row, ...keys) {
   return 0;
 }
 
+// ─── Full Configuration + SKU Generator (NEW — item #3 / #4) ─────────────────
+// Builds a human-readable "full configuration" string from a device's fields.
+// Works for both `inventory` rows and `po_items` rows since they share field names.
+function buildFullConfiguration(row) {
+  const parts = [];
+  if (row.model) parts.push(row.model);
+  if (row.storage) parts.push(row.storage);
+  if (row.ram) parts.push(row.ram + ' RAM');
+  if (row.color) parts.push(row.color);
+  if (row.wifi_cellular) parts.push(row.wifi_cellular);
+  if (row.processor) parts.push(row.processor);
+  return parts.join(' / ');
+}
+
+// Builds a SKU string from full config + grade, e.g.:
+//   "MACBOOK-AIR-13-2022-M2-256GB-16GB-STARLIGHT-A"
+function buildSkuFromConfig(row, grade) {
+  const cfg = buildFullConfiguration(row);
+  const slug = (cfg + (grade ? ' ' + grade : ''))
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')   // non-alphanumeric -> dash
+    .replace(/^-+|-+$/g, '')      // trim leading/trailing dashes
+    .replace(/-{2,}/g, '-');      // collapse multiple dashes
+  return slug;
+}
+
+// ─── Inventory auto-deduction helper (NEW — fixes orders not deducting stock) ─
+// Matches an incoming order's serial/IMEI against `inventory` and marks the
+// matching row sold. Used by /api/orders/import, /api/orders/shipstation,
+// and the one-time backfill route.
+async function tryMarkInventorySold(conn, serial, orderRowId) {
+  if (!serial) return { matched: false };
+
+  const [rows] = await conn.query(
+    `SELECT id, status, sold_order_id FROM inventory WHERE serial_number = ? OR imei = ? LIMIT 1`,
+    [serial, serial]
+  );
+  const invItem = rows[0];
+  if (!invItem) return { matched: false };
+
+  // Already sold to a DIFFERENT order — don't silently overwrite, just flag it.
+  if (invItem.status === 'sold' && invItem.sold_order_id && invItem.sold_order_id !== orderRowId) {
+    return { matched: true, conflict: true, sold_order_id: invItem.sold_order_id, inventory_id: invItem.id };
+  }
+
+  await conn.query(
+    `UPDATE inventory SET status = 'sold', sold_order_id = ?, sold_at = NOW() WHERE id = ?`,
+    [orderRowId, invItem.id]
+  );
+  return { matched: true, conflict: false, inventory_id: invItem.id };
+}
 // ─── Schema ───────────────────────────────────────────────────────────────────
 async function initDB() {
   await pool.query(`
@@ -435,7 +505,6 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  // ─── Parts PO Tables ───────────────────────────────────────────────────────
   await pool.query(`
     CREATE TABLE IF NOT EXISTS parts_pos (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -499,12 +568,18 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
-  // Migrate: add sku column to returns if missing
   try {
     await pool.query(`ALTER TABLE returns ADD COLUMN sku VARCHAR(500) AFTER order_id`);
   } catch (e) { /* column already exists */ }
 
-  // Backfill device_type for daily_orders rows where device_type IS NULL OR device_type = 'Other'
+  try {
+    await pool.query(`ALTER TABLE inventory ADD COLUMN full_configuration VARCHAR(500) AFTER model`);
+  } catch (e) { /* already exists */ }
+
+  try {
+    await pool.query(`ALTER TABLE po_items ADD COLUMN full_configuration VARCHAR(500) AFTER model`);
+  } catch (e) { /* already exists */ }
+
   try {
     const untyped = await dbAll("SELECT id, item_name, item_sku FROM daily_orders WHERE device_type IS NULL OR device_type = 'Other'");
     if (untyped.length > 0) {
@@ -518,7 +593,36 @@ async function initDB() {
     console.warn('Backfill device_type warning:', err.message);
   }
 
-  // Seed default admin
+  try {
+    const invRows = await dbAll(
+      `SELECT id, model, color, storage, ram FROM inventory WHERE full_configuration IS NULL OR full_configuration = ''`
+    );
+    if (invRows.length) {
+      await dbTx(async (conn) => {
+        for (const r of invRows) {
+          const cfg = buildFullConfiguration(r);
+          await conn.query('UPDATE inventory SET full_configuration = ? WHERE id = ?', [cfg, r.id]);
+        }
+      });
+      console.log(`Backfilled full_configuration for ${invRows.length} inventory rows.`);
+    }
+
+    const poRows = await dbAll(
+      `SELECT id, model, color, ram, storage FROM po_items WHERE full_configuration IS NULL OR full_configuration = ''`
+    );
+    if (poRows.length) {
+      await dbTx(async (conn) => {
+        for (const r of poRows) {
+          const cfg = buildFullConfiguration(r);
+          await conn.query('UPDATE po_items SET full_configuration = ? WHERE id = ?', [cfg, r.id]);
+        }
+      });
+      console.log(`Backfilled full_configuration for ${poRows.length} po_items rows.`);
+    }
+  } catch (err) {
+    console.warn('full_configuration backfill warning:', err.message);
+  }
+
   const adminExists = await dbGet('SELECT id FROM users WHERE username = ?', ['admin']);
   if (!adminExists) {
     await dbRun('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)', [
@@ -554,7 +658,6 @@ const DEFAULT_CATALOG = {
   storage: ['8GB','16GB','32GB','64GB','128GB','256GB','512GB','1TB','2TB','4TB'],
   models: {}
 };
-
 // ─── Auth Routes ──────────────────────────────────────────────────────────────
 app.post('/api/login', async (req, res) => {
   try {
@@ -612,6 +715,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
       ordPendingRow,
       ordShippedRow,
       ordDeliveredRow,
+      ordCancelledRow,
       byTypeRows,
       byVendorRows,
     ] = await Promise.all([
@@ -631,6 +735,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
       dbGet(`SELECT COUNT(*) c ${orderBase} AND COALESCE(t.delivery_status,'Pending') = 'Pending'`),
       dbGet(`SELECT COUNT(*) c ${orderBase} AND t.delivery_status = 'Shipped'`),
       dbGet(`SELECT COUNT(*) c ${orderBase} AND t.delivery_status = 'Delivered'`),
+      dbGet(`SELECT COUNT(*) c ${orderBase} AND t.delivery_status = 'Cancelled'`),
       dbAll("SELECT device_type, COUNT(*) count FROM inventory WHERE device_type IS NOT NULL AND device_type != '' GROUP BY device_type ORDER BY count DESC"),
       dbAll("SELECT vendor, COUNT(*) count FROM inventory WHERE vendor IS NOT NULL AND vendor != '' GROUP BY vendor ORDER BY count DESC LIMIT 10"),
     ]);
@@ -654,6 +759,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
         pending:   ordPendingRow.c,
         shipped:   ordShippedRow.c,
         delivered: ordDeliveredRow.c,
+        cancelled: ordCancelledRow.c,
       },
       inventory: {
         total: invTotal, tested: invTested, notTested: invNotTested,
@@ -726,6 +832,7 @@ app.put('/api/orders/:id', auth, async (req, res) => {
   }
 });
 
+// PATCHED: now auto-deducts matching inventory by serial/IMEI on import
 app.post('/api/orders/import', auth, upload.single('file'), async (req, res) => {
   try {
     const wb = XLSX.read(req.file.buffer, {cellDates: true});
@@ -746,17 +853,20 @@ app.post('/api/orders/import', auth, upload.single('file'), async (req, res) => 
     }
 
     let count = 0;
+    let conflicts = [];
     await dbTx(async (conn) => {
       for (const row of rows) {
         const od = parseXlDate(row['Order Date']);
-        await conn.query(
+        const serialNo = g(row,'Serial No.','Serial No','SERIAL_NO','serial_no');
+
+        const [result] = await conn.query(
           `INSERT INTO daily_orders
             (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, device_type)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             importDate,
             g(row,'Source','source'),
-            g(row,'Serial No.','Serial No','SERIAL_NO','serial_no'),
+            serialNo,
             g(row,'Order ID','order_id','OrderID'),
             od,
             g(row,'Item SKU','item_sku','SKU'),
@@ -767,10 +877,15 @@ app.post('/api/orders/import', auth, upload.single('file'), async (req, res) => 
             inferDeviceType(g(row,'Item Name','item_name','Description'), g(row,'Item SKU','item_sku','SKU'))
           ]
         );
+
+        // NEW: auto-deduct matching inventory item
+        const matchResult = await tryMarkInventorySold(conn, serialNo, result.insertId);
+        if (matchResult.conflict) conflicts.push({ serial: serialNo, sold_order_id: matchResult.sold_order_id });
+
         count++;
       }
     });
-    res.json({ success: true, imported: count });
+    res.json({ success: true, imported: count, inventory_conflicts: conflicts });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -821,6 +936,8 @@ app.put('/api/settings/shipstation', auth, async (req, res) => {
   }
 });
 
+// PATCHED: now tries to extract serial/IMEI from ShipStation item options
+// and auto-deducts matching inventory.
 app.post('/api/orders/shipstation', auth, async (req, res) => {
   try {
     let { apiKey, apiSecret, ship_date, orderStatus, saveCredentials } = req.body;
@@ -856,28 +973,41 @@ app.post('/api/orders/shipstation', auth, async (req, res) => {
     const orders = data.orders || [];
 
     let count = 0;
+    let conflicts = [];
     await dbTx(async (conn) => {
       for (const o of orders) {
         const oDate = o.orderDate ? o.orderDate.split('T')[0] : importDate;
         const store = o.advancedOptions?.storeName || 'ShipStation';
         const shippingPaid = o.shippingAmount || 0;
         for (const item of o.items || []) {
-          await conn.query(
+          // NEW: try to find a serial/IMEI from ShipStation's item options
+          let serialFromOptions = '';
+          if (Array.isArray(item.options)) {
+            const opt = item.options.find(o2 => /serial|imei/i.test(o2.name || ''));
+            if (opt) serialFromOptions = (opt.value || '').trim();
+          }
+
+          const [result] = await conn.query(
             `INSERT INTO daily_orders
               (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, shipping_paid, device_type)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-              importDate, store, '', String(o.orderNumber || o.orderId),
+              importDate, store, serialFromOptions, String(o.orderNumber || o.orderId),
               oDate, item.sku || '', item.name || '',
               o.shipTo?.name || '', item.quantity || 1, item.unitPrice || 0, shippingPaid,
               inferDeviceType(item.name, item.sku)
             ]
           );
+
+          // NEW: auto-deduct matching inventory item
+          const matchResult = await tryMarkInventorySold(conn, serialFromOptions, result.insertId);
+          if (matchResult.conflict) conflicts.push({ serial: serialFromOptions, sold_order_id: matchResult.sold_order_id });
+
           count++;
         }
       }
     });
-    res.json({ success: true, imported: count, ordersFound: orders.length });
+    res.json({ success: true, imported: count, ordersFound: orders.length, inventory_conflicts: conflicts });
   } catch (ex) {
     res.status(500).json({ error: ex.message });
   }
@@ -999,6 +1129,30 @@ app.post('/api/orders/:id/assign-serial', auth, async (req, res) => {
   }
 });
 
+// ─── NEW: One-time backfill for orders that were missed before this patch ────
+// Call once via POST /api/admin/backfill-inventory-deduction with an admin
+// JWT, then feel free to remove this route.
+app.post('/api/admin/backfill-inventory-deduction', auth, adminOnly, async (req, res) => {
+  try {
+    const orders = await dbAll(
+      `SELECT id, serial_no FROM daily_orders WHERE serial_no IS NOT NULL AND serial_no != ''`
+    );
+    let matched = 0, conflicts = [];
+
+    await dbTx(async (conn) => {
+      for (const o of orders) {
+        const result = await tryMarkInventorySold(conn, o.serial_no, o.id);
+        if (result.matched && !result.conflict) matched++;
+        if (result.conflict) conflicts.push({ order_id: o.id, serial: o.serial_no, sold_order_id: result.sold_order_id });
+      }
+    });
+
+    res.json({ success: true, total_orders_checked: orders.length, newly_matched: matched, conflicts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Inventory ────────────────────────────────────────────────────────────────
 app.get('/api/inventory', auth, async (req, res) => {
   try {
@@ -1072,20 +1226,20 @@ app.get('/api/inventory/export', auth, async (req, res) => {
     q += ' ORDER BY i.created_at DESC';
     const rows = await dbAll(q, p);
 
-    const hdr = ['Vendor','Month','Year','Lot ID','Invoice No','Device Type','Model','Description',
+    const hdr = ['Vendor','Month','Year','Lot ID','Invoice No','Device Type','Model','Full Configuration','Description',
       'Serial Number','IMEI','Color','Storage','RAM','WiFi/Cellular','Screen Size',
       'Grade','Condition','Lock Status','Carrier','Missing Components','Damages',
-      'SKU','PO Number','Price','PO Price','Facility','Remarks',
+      'SKU','PO Number','Price','PO Price','Facility','Remarks','Status',
       'Overall Grade','Final Grade (Tested)','Test Date','Testing Owner','MDM Lock','D Grade Description',
       'LCD','Touch','Face ID/FP','Fingerprint','Front Camera','Rear Camera',
       'Speaker','Mic','WiFi','Cellular','Bluetooth','Charging','Vibration',
       'Keyboard','Trackpad','USB Ports','Hinge','Battery Health %','Battery Cycles','Test Notes'];
 
     const data = [hdr, ...rows.map(it => [
-      it.vendor, it.month, it.year, it.lot_id||'', it.invoice_no||'', it.device_type, it.model||'', it.description||'',
+      it.vendor, it.month, it.year, it.lot_id||'', it.invoice_no||'', it.device_type, it.model||'', it.full_configuration||'', it.description||'',
       it.serial_number||'', it.imei||'', it.color||'', it.storage||'', it.ram||'', it.wifi_cellular||'', it.screen_size||'',
       it.grade||'', it.condition_grade||'', it.lock_status||'', it.carrier||'', it.missing_components||'', it.damages||'',
-      it.sku||'', it.po_number||'', it.price||0, it.po_price||0, it.facility||'', it.remarks||'',
+      it.sku||'', it.po_number||'', it.price||0, it.po_price||0, it.facility||'', it.remarks||'', it.status||'available',
       it.overall_grade||'', it.tested_grade||'', it.test_date||'', it.testing_owner||it.tested_by||'', it.mdm_lock||'', it.d_grade_description||'',
       it.lcd_test||'', it.touch_test||'', it.face_id_test||'', it.fingerprint_test||'',
       it.front_camera_test||'', it.rear_camera_test||'', it.speaker_test||'', it.mic_test||'',
@@ -1105,9 +1259,15 @@ app.get('/api/inventory/export', auth, async (req, res) => {
   }
 });
 
+// PATCHED: this route is ALSO your manual entry endpoint (item #1) — any
+// frontend form can POST here with whatever fields it has. Now also
+// auto-fills full_configuration + sku when not explicitly provided (item #3/#4).
 app.post('/api/inventory', auth, async (req, res) => {
   try {
-    const d = req.body;
+    const d = { ...req.body };
+    if (!d.full_configuration) d.full_configuration = buildFullConfiguration(d);
+    if (!d.sku) d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
+
     const keys = Object.keys(d).filter(k => k !== 'id' && k !== 'created_at');
     const result = await dbRun(
       `INSERT INTO inventory (${keys.join(', ')}) VALUES (${keys.map(()=>'?').join(', ')})`,
@@ -1119,9 +1279,14 @@ app.post('/api/inventory', auth, async (req, res) => {
   }
 });
 
+// PATCHED: regenerates full_configuration + sku when specs change
 app.put('/api/inventory/:id', auth, async (req, res) => {
   try {
-    const d = req.body;
+    const d = { ...req.body };
+    if (d.model || d.color || d.storage || d.ram) {
+      d.full_configuration = buildFullConfiguration(d);
+      d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
+    }
     const keys = Object.keys(d).filter(k => k !== 'id' && k !== 'created_at');
     await dbRun(
       `UPDATE inventory SET ${keys.map(k=>`${k}=?`).join(', ')} WHERE id = ?`,
@@ -1170,29 +1335,36 @@ app.post('/api/inventory/import', auth, upload.single('file'), async (req, res) 
             if (match) imei = match[1];
           }
 
+          const model = g(row,'Description','DESCRIPTION','description','Item','FullModel','Model');
+          const color = g(row,'Color','COLOR','color','Color.1');
+          const storage = g(row,'Storage','STORAGE','storage','Hard_Drive_1','Storage_Capacity');
+          const ram = g(row,'RAM','Ram','ram');
+          const grade = g(row,'Grade','GRADE','grade','Grade.1','Condition');
+
+          const fullConfig = buildFullConfiguration({ model, color, storage, ram });
+          const sku = g(row,"Sku's",'SKU','sku','Sku','SKUs') || buildSkuFromConfig({ model, color, storage, ram }, grade);
+
           await conn.query(
             `INSERT INTO inventory
               (month, year, vendor, device_type, po_number, vendor_item_id, manufacturer, part_number,
-               description, serial_number, imei, condition_grade, missing_components, damages,
+               description, model, full_configuration, serial_number, imei, condition_grade, missing_components, damages,
                color, storage, ram, screen_size, grade, sku, facility, carrier, lock_status, price, po_price, remarks)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [
               month, parseInt(year), vendor, device_type,
               g(row,'PO','po','PO Number','PO#'),
               g(row,'Apto_id','id','S. No.','S.No.','Item_ID'),
               g(row,'MANUFACTURER','Manufacturer','Brand'),
               g(row,'PART_NUMBER','Part Number','PartNumber','Model Number'),
-              g(row,'Description','DESCRIPTION','description','Item','FullModel','Model'),
+              model, model, fullConfig,
               sn, imei,
               g(row,'CONDITION','Condition','Condition_Grade'),
               g(row,'Missing Components','MISSING COMPONENTS','Missing_Components'),
               g(row,'Damages','DAMAGES','Damage','Defects','Notes'),
-              g(row,'Color','COLOR','color','Color.1'),
-              g(row,'Storage','STORAGE','storage','Hard_Drive_1','Storage_Capacity'),
-              g(row,'RAM','Ram','ram'),
+              color, storage, ram,
               g(row,'Screen Size','SCREEN SIZE','Screen_Size'),
-              g(row,'Grade','GRADE','grade','Grade.1','Condition'),
-              g(row,"Sku's",'SKU','sku','Sku','SKUs'),
+              grade,
+              sku,
               g(row,'Facility','facility','id_PalletDestination','Location'),
               g(row,'Carrier','carrier','Lock/Unlock','Lock/unlock','Lock_Unlock'),
               g(row,'Lock/Unlock','Lock/unlock','lock_status','Lock_Unlock'),
@@ -1242,7 +1414,6 @@ app.post('/api/inventory/:id/testing', auth, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-
 // ─── Users ────────────────────────────────────────────────────────────────────
 app.get('/api/users', auth, adminOnly, async (req, res) => {
   try {
@@ -1450,13 +1621,19 @@ app.get('/api/purchase-orders/:id/items', auth, async (req, res) => {
   }
 });
 
+// PATCHED: auto-fills full_configuration + sku (item #3/#4); receive_status
+// can now also be set to 'Cancelled' by the frontend (item #2 — no schema
+// change needed, it's a free-text VARCHAR column).
 app.post('/api/po-items', auth, async (req, res) => {
   try {
-    const d = req.body;
+    const d = { ...req.body };
+    if (!d.full_configuration) d.full_configuration = buildFullConfiguration(d);
+    if (!d.sku) d.sku = buildSkuFromConfig(d, null);
+
     const result = await dbRun(
-      `INSERT INTO po_items (po_id,device_type,brand,model,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [d.po_id,d.device_type||'',d.brand||'',d.model||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'']
+      `INSERT INTO po_items (po_id,device_type,brand,model,full_configuration,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes,receive_status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [d.po_id,d.device_type||'',d.brand||'',d.model||'',d.full_configuration||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',d.receive_status||'Pending']
     );
     res.json({ success: true, id: result.insertId });
   } catch (err) {
@@ -1464,12 +1641,17 @@ app.post('/api/po-items', auth, async (req, res) => {
   }
 });
 
+// PATCHED: regenerates full_configuration + sku when specs change
 app.put('/api/po-items/:id', auth, async (req, res) => {
   try {
-    const d = req.body;
+    const d = { ...req.body };
+    if (d.model || d.color || d.storage || d.ram) {
+      d.full_configuration = buildFullConfiguration(d);
+      d.sku = buildSkuFromConfig(d, null);
+    }
     await dbRun(
-      `UPDATE po_items SET device_type=?,brand=?,model=?,sku=?,description=?,serial_number=?,imei=?,color=?,ram=?,storage=?,processor=?,wifi_cellular=?,qty=?,unit_price=?,notes=? WHERE id=?`,
-      [d.device_type||'',d.brand||'',d.model||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',req.params.id]
+      `UPDATE po_items SET device_type=?,brand=?,model=?,full_configuration=?,sku=?,description=?,serial_number=?,imei=?,color=?,ram=?,storage=?,processor=?,wifi_cellular=?,qty=?,unit_price=?,notes=?,receive_status=? WHERE id=?`,
+      [d.device_type||'',d.brand||'',d.model||'',d.full_configuration||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',d.receive_status||'Pending',req.params.id]
     );
     res.json({ success: true });
   } catch (err) {
@@ -1516,15 +1698,17 @@ app.post('/api/po-items/:id/receive', auth, async (req, res) => {
           const u = units?.[i] || {};
           const sn = u.serial_number !== undefined ? u.serial_number : (qty === 1 ? item.serial_number||'' : '');
           const im = u.imei !== undefined ? u.imei : (qty === 1 ? item.imei||'' : '');
+          const fullConfig = item.full_configuration || buildFullConfiguration(item);
+          const itemSku = item.sku || buildSkuFromConfig(item, null);
           const [result] = await conn.query(
             `INSERT INTO inventory
-              (vendor, month, year, device_type, model, color, ram, storage, wifi_cellular,
+              (vendor, month, year, device_type, model, full_configuration, color, ram, storage, wifi_cellular,
                serial_number, imei, sku, description, lot_id, invoice_no, po_id, price, po_price)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [
               item.vendor_name||'', item.purchase_month||'', item.purchase_year||null,
-              item.device_type||'', item.model||'', item.color||'', item.ram||'', item.storage||'',
-              item.wifi_cellular||'', sn, im, item.sku||'', item.description||'',
+              item.device_type||'', item.model||'', fullConfig, item.color||'', item.ram||'', item.storage||'',
+              item.wifi_cellular||'', sn, im, itemSku, item.description||'',
               item.lot_id||'', item.invoice_no||'', item.po_id,
               item.unit_price||0, item.unit_price||0
             ]
@@ -1557,18 +1741,20 @@ app.post('/api/purchase-orders/:id/receive-all', auth, async (req, res) => {
       for (const item of items) {
         const qty = item.qty || 1;
         let firstId = null;
+        const fullConfig = item.full_configuration || buildFullConfiguration(item);
+        const itemSku = item.sku || buildSkuFromConfig(item, null);
         for (let i = 0; i < qty; i++) {
           const sn = (qty === 1 ? item.serial_number||'' : '');
           const im = (qty === 1 ? item.imei||'' : '');
           const [result] = await conn.query(
             `INSERT INTO inventory
-              (vendor, month, year, device_type, model, color, ram, storage, wifi_cellular,
+              (vendor, month, year, device_type, model, full_configuration, color, ram, storage, wifi_cellular,
                serial_number, imei, sku, description, lot_id, invoice_no, po_id, price, po_price)
-              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
             [
               item.vendor_name||'', item.purchase_month||'', item.purchase_year||null,
-              item.device_type||'', item.model||'', item.color||'', item.ram||'', item.storage||'',
-              item.wifi_cellular||'', sn, im, item.sku||'', item.description||'',
+              item.device_type||'', item.model||'', fullConfig, item.color||'', item.ram||'', item.storage||'',
+              item.wifi_cellular||'', sn, im, itemSku, item.description||'',
               item.lot_id||'', item.invoice_no||'', item.po_id,
               item.unit_price||0, item.unit_price||0
             ]
@@ -1598,9 +1784,9 @@ app.get('/api/purchase-orders/:id/export', auth, async (req, res) => {
       [po.lot_id,po.invoice_no,po.vendor_name,po.purchase_month,po.purchase_year,po.device_types,po.notes,po.created_at]
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(hdr), 'PO Header');
-    const rows = [['Device Type','Brand','Model','SKU','Description','Serial Number','IMEI','Color','RAM','Storage','Processor','WiFi/Cellular','Qty','Unit Price','Receive Status','Notes']];
+    const rows = [['Device Type','Brand','Model','Full Configuration','SKU','Description','Serial Number','IMEI','Color','RAM','Storage','Processor','WiFi/Cellular','Qty','Unit Price','Receive Status','Notes']];
     for (const it of items) {
-      rows.push([it.device_type,it.brand,it.model,it.sku,it.description,it.serial_number,it.imei,it.color,it.ram,it.storage,it.processor,it.wifi_cellular,it.qty,it.unit_price,it.receive_status||'Pending',it.notes]);
+      rows.push([it.device_type,it.brand,it.model,it.full_configuration,it.sku,it.description,it.serial_number,it.imei,it.color,it.ram,it.storage,it.processor,it.wifi_cellular,it.qty,it.unit_price,it.receive_status||'Pending',it.notes]);
     }
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'PO Items');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -1625,21 +1811,25 @@ app.post('/api/purchase-orders/:id/import-items', auth, upload.single('file'), a
     let count = 0;
     await dbTx(async (conn) => {
       for (const row of rows) {
+        const model = g(row,'Model','model');
+        const color = g(row,'Color','color');
+        const storage = g(row,'Storage','storage','Capacity');
+        const ram = g(row,'RAM','ram','Memory');
+        const fullConfig = buildFullConfiguration({ model, color, storage, ram });
+        const sku = g(row,'SKU','sku') || buildSkuFromConfig({ model, color, storage, ram }, null);
+
         await conn.query(
-          `INSERT INTO po_items (po_id,device_type,brand,model,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          `INSERT INTO po_items (po_id,device_type,brand,model,full_configuration,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             req.params.id,
             g(row,'Device Type','device_type','Type'),
             g(row,'Brand','brand','Manufacturer'),
-            g(row,'Model','model'),
-            g(row,'SKU','sku'),
+            model, fullConfig, sku,
             g(row,'Description','description','Item Name'),
             g(row,'Serial Number','serial_number','S/N','Serial No','Serial No.','Serial','SERIAL','SN','S.No.','SERIAL_NUMBER','Serial_Number','SerialNumber','serial','Serial #','S/N No'),
             g(row,'IMEI','imei','IMEI No','IMEI No.','IMEI Number','imei_number'),
-            g(row,'Color','color'),
-            g(row,'RAM','ram','Memory'),
-            g(row,'Storage','storage','Capacity'),
+            color, ram, storage,
             g(row,'Processor','processor','CPU'),
             g(row,'WiFi/Cellular','wifi_cellular','Connectivity'),
             parseInt(g(row,'Qty','qty','Quantity'))||1,
@@ -1658,16 +1848,19 @@ app.post('/api/purchase-orders/:id/import-items', auth, upload.single('file'), a
 
 // ─── Parts POs ────────────────────────────────────────────────────────────────
 
-// Helper: recompute PO status from its items
+// PATCHED: cancelled items now count as "resolved" so a PO with cancelled
+// line items can still close (item #2).
 async function recalcPoStatus(poId) {
-  const items = await dbAll('SELECT quantity_ordered, received_quantity FROM parts_po_items WHERE po_id = ?', [poId]);
+  const items = await dbAll('SELECT quantity_ordered, received_quantity, receive_status FROM parts_po_items WHERE po_id = ?', [poId]);
   const po = await dbGet('SELECT status FROM parts_pos WHERE id = ?', [poId]);
   if (!po || po.status === 'Cancelled') return;
   let newStatus = 'Open';
   if (items.length > 0) {
-    const allReceived = items.every(i => (i.received_quantity || 0) >= (i.quantity_ordered || 1));
+    const resolved = items.every(i =>
+      i.receive_status === 'Cancelled' || (i.received_quantity || 0) >= (i.quantity_ordered || 1)
+    );
     const anyReceived = items.some(i => (i.received_quantity || 0) > 0);
-    if (allReceived) newStatus = 'Closed';
+    if (resolved) newStatus = 'Closed';
     else if (anyReceived) newStatus = 'Partial';
     else newStatus = 'Open';
   }
@@ -1675,7 +1868,6 @@ async function recalcPoStatus(poId) {
   return newStatus;
 }
 
-// GET /api/parts-pos
 app.get('/api/parts-pos', auth, async (req, res) => {
   try {
     const { status, vendor, search } = req.query;
@@ -1704,7 +1896,6 @@ app.get('/api/parts-pos', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/parts-pos
 app.post('/api/parts-pos', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -1731,7 +1922,6 @@ app.post('/api/parts-pos', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/parts-pos/:id
 app.get('/api/parts-pos/:id', auth, async (req, res) => {
   try {
     const po = await dbGet('SELECT * FROM parts_pos WHERE id = ?', [req.params.id]);
@@ -1741,7 +1931,6 @@ app.get('/api/parts-pos/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT /api/parts-pos/:id
 app.put('/api/parts-pos/:id', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -1759,7 +1948,6 @@ app.put('/api/parts-pos/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/parts-pos/:id/items
 app.post('/api/parts-pos/:id/items', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -1773,7 +1961,6 @@ app.post('/api/parts-pos/:id/items', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT /api/parts-pos/:id/items/:itemId
 app.put('/api/parts-pos/:id/items/:itemId', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -1787,7 +1974,6 @@ app.put('/api/parts-pos/:id/items/:itemId', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/parts-pos/:id/items/:itemId
 app.delete('/api/parts-pos/:id/items/:itemId', auth, async (req, res) => {
   try {
     await dbRun('DELETE FROM parts_po_items WHERE id=? AND po_id=?', [req.params.itemId, req.params.id]);
@@ -1796,7 +1982,6 @@ app.delete('/api/parts-pos/:id/items/:itemId', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/parts-pos/:id
 app.delete('/api/parts-pos/:id', auth, adminOnly, async (req, res) => {
   try {
     await dbRun('DELETE FROM parts_pos WHERE id = ?', [req.params.id]);
@@ -1804,7 +1989,6 @@ app.delete('/api/parts-pos/:id', auth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/parts-pos/:id/receive  — bulk receive items, auto-update PO status
 app.post('/api/parts-pos/:id/receive', auth, async (req, res) => {
   try {
     const poId = req.params.id;
@@ -1825,7 +2009,6 @@ app.post('/api/parts-pos/:id/receive', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/parts-pos/from-requisition/:reqId
 app.post('/api/parts-pos/from-requisition/:reqId', auth, async (req, res) => {
   try {
     const req2 = await dbGet('SELECT * FROM part_requisitions WHERE id = ?', [req.params.reqId]);
@@ -1851,10 +2034,8 @@ app.post('/api/parts-pos/from-requisition/:reqId', auth, async (req, res) => {
     res.json({ id: poId, success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 // ─── Service Orders ────────────────────────────────────────────────────────────
 
-// GET /api/service-orders
 app.get('/api/service-orders', auth, async (req, res) => {
   try {
     const { status, technician, repair_type, search } = req.query;
@@ -1880,7 +2061,6 @@ app.get('/api/service-orders', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/service-orders
 app.post('/api/service-orders', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -1906,7 +2086,6 @@ app.post('/api/service-orders', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/service-orders/:id
 app.get('/api/service-orders/:id', auth, async (req, res) => {
   try {
     const so = await dbGet('SELECT * FROM service_orders WHERE id = ?', [req.params.id]);
@@ -1916,7 +2095,6 @@ app.get('/api/service-orders/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT /api/service-orders/:id
 app.put('/api/service-orders/:id', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -1941,7 +2119,6 @@ app.put('/api/service-orders/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/service-orders/:id
 app.delete('/api/service-orders/:id', auth, adminOnly, async (req, res) => {
   try {
     await dbRun('DELETE FROM service_orders WHERE id = ?', [req.params.id]);
@@ -1951,11 +2128,9 @@ app.delete('/api/service-orders/:id', auth, adminOnly, async (req, res) => {
 
 // ─── Parts Inventory ───────────────────────────────────────────────────────────
 
-// GET /api/parts-inventory
 app.get('/api/parts-inventory', auth, async (req, res) => {
   try {
     const { category, part_type, model, search } = req.query;
-    // Get all unique SKUs with meta from PO items (primary source)
     const skuRows = await dbAll(`
       SELECT part_sku,
              MAX(part_type) as part_type,
@@ -1969,18 +2144,15 @@ app.get('/api/parts-inventory', auth, async (req, res) => {
              MAX(model_compatibility) as model_compatibility
       FROM service_order_parts GROUP BY part_sku
     `);
-    // Collapse duplicates (same sku from both tables)
     const skuMap = {};
     for (const r of skuRows) {
       if (!skuMap[r.part_sku]) skuMap[r.part_sku] = r;
       else {
-        // prefer non-null values
         if (!skuMap[r.part_sku].part_type && r.part_type) skuMap[r.part_sku].part_type = r.part_type;
         if (!skuMap[r.part_sku].part_category && r.part_category) skuMap[r.part_sku].part_category = r.part_category;
         if (!skuMap[r.part_sku].model_compatibility && r.model_compatibility) skuMap[r.part_sku].model_compatibility = r.model_compatibility;
       }
     }
-    // Aggregated stock in
     const stockIn = await dbAll(`
       SELECT ppi.part_sku, SUM(ppi.received_quantity) as received_quantity
       FROM parts_po_items ppi
@@ -1988,18 +2160,15 @@ app.get('/api/parts-inventory', auth, async (req, res) => {
       GROUP BY ppi.part_sku`);
     const inMap = {};
     stockIn.forEach(r => { inMap[r.part_sku] = r.received_quantity || 0; });
-    // Aggregated stock out
     const stockOut = await dbAll(`SELECT part_sku, SUM(quantity) as qty FROM service_order_parts GROUP BY part_sku`);
     const outMap = {};
     stockOut.forEach(r => { outMap[r.part_sku] = r.qty || 0; });
-    // Open PO quantities
     const openPO = await dbAll(`
       SELECT i.part_sku, SUM(i.quantity_ordered - i.received_quantity) as qty
       FROM parts_po_items i JOIN parts_pos pos ON pos.id = i.po_id
       WHERE pos.status IN ('Open','Partial') GROUP BY i.part_sku`);
     const openPOMap = {};
     openPO.forEach(r => { openPOMap[r.part_sku] = r.qty || 0; });
-    // Open requisition quantities
     const openReq = await dbAll(`SELECT part_sku, SUM(quantity_needed) as qty FROM part_requisitions WHERE status IN ('Requested','Approved') GROUP BY part_sku`);
     const openReqMap = {};
     openReq.forEach(r => { openReqMap[r.part_sku] = r.qty || 0; });
@@ -2016,7 +2185,6 @@ app.get('/api/parts-inventory', auth, async (req, res) => {
       open_req_qty: openReqMap[p.part_sku] || 0,
     }));
 
-    // Apply filters in JS (already have all data)
     if (category)   parts = parts.filter(p => p.part_category === category);
     if (part_type)  parts = parts.filter(p => p.part_type === part_type);
     if (model)      parts = parts.filter(p => (p.model_compatibility || '').toLowerCase().includes(model.toLowerCase()));
@@ -2036,7 +2204,6 @@ app.get('/api/parts-inventory', auth, async (req, res) => {
 
 // ─── Returns ──────────────────────────────────────────────────────────────────
 
-// GET /api/returns — list with optional filters
 app.get('/api/returns', auth, async (req, res) => {
   try {
     const { status, return_from, search, from, to } = req.query;
@@ -2054,7 +2221,6 @@ app.get('/api/returns', auth, async (req, res) => {
     sql += ' ORDER BY created_at DESC';
     const rows = await dbAll(sql, params);
 
-    // Stats
     const stats = await dbAll(`
       SELECT status, COUNT(*) as cnt FROM returns GROUP BY status
     `);
@@ -2065,7 +2231,6 @@ app.get('/api/returns', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/returns/:id — detail
 app.get('/api/returns/:id', auth, async (req, res) => {
   try {
     const row = await dbGet('SELECT * FROM returns WHERE id = ?', [req.params.id]);
@@ -2074,7 +2239,6 @@ app.get('/api/returns/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/returns — create intake
 app.post('/api/returns', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -2101,7 +2265,6 @@ app.post('/api/returns', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PUT /api/returns/:id — update (intake, testing, or ops fields)
 app.put('/api/returns/:id', auth, async (req, res) => {
   try {
     const b = req.body;
@@ -2146,7 +2309,6 @@ app.put('/api/returns/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/returns/:id — admin only
 app.delete('/api/returns/:id', auth, adminOnly, async (req, res) => {
   try {
     const result = await dbRun('DELETE FROM returns WHERE id = ?', [req.params.id]);
@@ -2224,7 +2386,6 @@ app.delete('/api/requisitions/:id', auth, adminOnly, async (req, res) => {
 
 // ─── Return Media ─────────────────────────────────────────────────────────────
 
-// GET /api/returns/:id/media — list media for a return
 app.get('/api/returns/:id/media', auth, async (req, res) => {
   try {
     const rows = await dbAll(
@@ -2235,7 +2396,6 @@ app.get('/api/returns/:id/media', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/returns/:id/media — upload one or more files
 app.post('/api/returns/:id/media', auth, (req, res, next) => {
   mediaUpload.array('files', 20)(req, res, err => {
     if (err) return res.status(400).json({ error: err.message });
@@ -2273,7 +2433,6 @@ app.post('/api/returns/:id/media', auth, (req, res, next) => {
   }
 });
 
-// PATCH /api/returns/media/:mediaId/caption — update caption
 app.patch('/api/returns/media/:mediaId/caption', auth, async (req, res) => {
   try {
     await dbRun('UPDATE return_media SET caption = ? WHERE id = ?', [req.body.caption || null, req.params.mediaId]);
@@ -2281,21 +2440,76 @@ app.patch('/api/returns/media/:mediaId/caption', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/returns/media/:mediaId — delete a media file
 app.delete('/api/returns/media/:mediaId', auth, async (req, res) => {
   try {
     const row = await dbGet('SELECT * FROM return_media WHERE id = ?', [req.params.mediaId]);
     if (!row) return res.status(404).json({ error: 'Not found' });
-    // Only uploader or admin can delete
     if (row.uploaded_by !== req.user.username && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Forbidden' });
     }
-    // Remove file from disk
     const filePath = path.join(MEDIA_DIR, row.filename);
     try { fs.unlinkSync(filePath); } catch {}
     await dbRun('DELETE FROM return_media WHERE id = ?', [req.params.mediaId]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── PUBLIC SHOP INVENTORY (NEW — for shop.tekhouz.com) ────────────────────────
+// No auth. CORS-restricted (see middleware near top of file). Strips
+// vendor/cost/serial/IMEI data — only model/color/storage/RAM/grade/qty/price.
+app.get('/api/shop/inventory', async (req, res) => {
+  try {
+    const rows = await dbAll(`
+      SELECT
+        i.device_type   AS category_raw,
+        i.model,
+        i.color,
+        i.storage,
+        i.ram,
+        COALESCE(t.overall_grade, i.grade, 'B') AS grade,
+        i.price,
+        COUNT(*) AS qty
+      FROM inventory i
+      LEFT JOIN inventory_testing t ON i.id = t.inventory_id
+      WHERE i.status = 'available'
+        AND i.price > 0
+      GROUP BY i.device_type, i.model, i.color, i.storage, i.ram,
+               COALESCE(t.overall_grade, i.grade, 'B'), i.price
+      ORDER BY i.device_type, i.model, i.price
+    `);
+
+    function mapCategory(deviceType) {
+      const d = (deviceType || '').toLowerCase();
+      if (d.includes('iphone')) return 'iphone';
+      if (d.includes('macbook') || d === 'laptop') return 'macbook';
+      if (d.includes('samsung') || d.includes('android')) return 'android';
+      if (d.includes('surface')) return 'surface';
+      if (d.includes('ipad') || d.includes('tablet')) return 'ipad';
+      return 'other';
+    }
+
+    const products = rows.map(r => ({
+      category: mapCategory(r.category_raw),
+      model: r.model || '',
+      color: r.color || '',
+      storage: r.storage || '',
+      ram: r.ram || '',
+      grade: (r.grade || 'B').toString().charAt(0).toUpperCase(),
+      qty: Number(r.qty),
+      price: Math.round(Number(r.price))
+    }));
+
+    res.setHeader('Cache-Control', 'public, max-age=30');
+    res.json({
+      updated_at: new Date().toISOString(),
+      count: products.length,
+      total_units: products.reduce((s, p) => s + p.qty, 0),
+      products
+    });
+  } catch (err) {
+    console.error('shop/inventory error:', err.message);
+    res.status(500).json({ error: 'Failed to load inventory' });
+  }
 });
 
 // ─── Start Server ─────────────────────────────────────────────────────────────
