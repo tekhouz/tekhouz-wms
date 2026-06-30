@@ -232,26 +232,37 @@ function buildSkuFromConfig(row, grade) {
   const variant = (row.model_variant || '').trim();
   const g       = grade ? String(grade).trim() : '';
 
-  const fullColor = (row.color || '').trim(); // spelled-out color for iPhones
+  const fullColor = (row.color || '').trim();
+  const carrier   = (row.carrier || '').replace(/\s+/g,'').replace(/[^A-Za-z0-9]/g,''); // e.g. "Tmobile"
 
-  // iPhone: iPhone16ProMax-128GB-Black-A
-  if (/iphone/i.test(model)) {
-    const num = model.replace(/iphone\s*/i, '').replace(/\s+/g, '');
-    const variantSuffix = variant && !model.toLowerCase().includes(variant.toLowerCase()) ? variant.replace(/\s+/g,'') : '';
-    const prefix = 'iPhone' + num + variantSuffix;
-    const parts = [prefix];
+  // Helper: build phone-style SKU — PREFIX+ModelNum+Variant-Storage-FullColor-Grade(-Carrier)
+  function phoneSku(prefix) {
+    // Strip device name from model to get just the number/variant: "iPhone 15 Pro Max" -> "15ProMax"
+    const stripped = model.replace(new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*','i'),'').replace(/\s+/g,'');
+    const variantSuffix = variant && !stripped.toLowerCase().includes(variant.toLowerCase()) ? variant.replace(/\s+/g,'') : '';
+    const parts = [prefix + stripped + variantSuffix];
     if (storage)   parts.push(storage);
     if (fullColor) parts.push(fullColor);
     if (g)         parts.push(g);
+    if (carrier)   parts.push(carrier);
     return parts.filter(Boolean).join('-');
   }
 
-  // iPad: iPad-ScreenSize-Year-Processor-RAM-Storage-Color-Grade
-  if (/ipad/i.test(model)) {
-    const num = model.replace(/ipad\s*/i, '').replace(/\s+/g, '');
-    const variantSuffix = variant && !model.toLowerCase().includes(variant.toLowerCase()) ? variant.replace(/\s+/g,'') : '';
-    const prefix = 'iPad' + num + variantSuffix;
-    const parts = [prefix];
+  // iPhone: iPhone15ProMax-256GB-Black-A
+  if (/iphone/i.test(model)) return phoneSku('iPhone');
+
+  // iPad: iPad-Storage-FullColor-Grade
+  if (/ipad/i.test(model)) return phoneSku('iPad');
+
+  // Google Pixel: GPixel-7Pro-128GB-Black-A(-Tmobile)
+  if (/google\s*pixel/i.test(model) || /pixel/i.test(model)) return phoneSku('GPixel');
+
+  // Samsung: SM-S22-128GB-Purple-A  or  SM-128GB-Black-A
+  if (/samsung/i.test(model) || /galaxy/i.test(model) || /^SM-/i.test(model)) return phoneSku('SM');
+
+  // MacBook Pro: MBP-13"-2020-M1-16GB-256GB-SL-B
+  if (/macbook\s*pro/i.test(model) || (/macbook/i.test(model) && /pro/i.test(variant))) {
+    const parts = ['MBP'];
     if (screen)  parts.push(screen);
     if (year)    parts.push(year);
     if (proc)    parts.push(proc);
@@ -262,32 +273,30 @@ function buildSkuFromConfig(row, grade) {
     return parts.filter(Boolean).join('-');
   }
 
-  // Determine prefix for other devices
-  let prefix = '';
-  if (/macbook\s*pro/i.test(model) || (/macbook/i.test(model) && /pro/i.test(variant))) {
-    prefix = 'MBP';
-  } else if (/macbook\s*air/i.test(model) || (/macbook/i.test(model) && /air/i.test(variant))) {
-    prefix = 'MBA';
-  } else if (/macbook/i.test(model)) {
-    prefix = 'MBA';
-  } else if (/samsung/i.test(model) || /galaxy/i.test(model) || /^SM-/i.test(model)) {
-    prefix = 'SM';
-  } else if (/google\s*pixel/i.test(model) || /pixel/i.test(model)) {
-    prefix = 'GPixel';
-  } else {
-    prefix = model.split(/\s+/)[0].replace(/[^A-Za-z0-9]/g, '') || 'DEV';
+  // MacBook Air: MBA-13"-2020-M1-16GB-256GB-SL-B
+  if (/macbook/i.test(model)) {
+    const parts = ['MBA'];
+    if (screen)  parts.push(screen);
+    if (year)    parts.push(year);
+    if (proc)    parts.push(proc);
+    if (ram)     parts.push(ram);
+    if (storage) parts.push(storage);
+    if (color)   parts.push(color);
+    if (g)       parts.push(g);
+    return parts.filter(Boolean).join('-');
   }
 
-  // Universal template: PREFIX-ScreenSize-Year-Processor-RAM-Storage-ColorAbbr-Grade
-  const parts = [prefix];
-  if (screen)  parts.push(screen);
-  if (year)    parts.push(year);
-  if (proc)    parts.push(proc);
-  if (ram)     parts.push(ram);
-  if (storage) parts.push(storage);
-  if (color)   parts.push(color);
-  if (g)       parts.push(g);
-
+  // Generic fallback: FirstWord-Storage-Color-Grade
+  const genericPrefix = model.split(/\s+/)[0].replace(/[^A-Za-z0-9]/g,'') || 'DEV';
+  const parts = [genericPrefix];
+  if (screen)    parts.push(screen);
+  if (year)      parts.push(year);
+  if (proc)      parts.push(proc);
+  if (ram)       parts.push(ram);
+  if (storage)   parts.push(storage);
+  if (fullColor) parts.push(fullColor);
+  if (g)         parts.push(g);
+  if (carrier)   parts.push(carrier);
   return parts.filter(Boolean).join('-');
 }
 
