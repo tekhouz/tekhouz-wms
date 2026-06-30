@@ -579,17 +579,6 @@ async function initDB() {
   try {
     await pool.query(`ALTER TABLE po_items ADD COLUMN full_configuration VARCHAR(500) AFTER model`);
   } catch (e) { /* already exists */ }
-  for (const col of [
-    'screen_size VARCHAR(50)', 'year INT', 'model_variant VARCHAR(50)',
-    'grade VARCHAR(50)', 'condition_grade VARCHAR(50)', 'lock_status VARCHAR(100)',
-    'carrier VARCHAR(100)', 'missing_components VARCHAR(255)', 'damages VARCHAR(255)',
-    'po_price DECIMAL(10,2)', 'facility VARCHAR(100)', 'remarks VARCHAR(255)'
-  ]) {
-    try { await pool.query(`ALTER TABLE po_items ADD COLUMN ${col}`); } catch(e) { /* already exists */ }
-  }
-  for (const col of ['processor VARCHAR(255)', 'screen_size VARCHAR(50)', 'model_variant VARCHAR(50)']) {
-    try { await pool.query(`ALTER TABLE inventory ADD COLUMN ${col}`); } catch(e) { /* already exists */ }
-  }
 
   try {
     const untyped = await dbAll("SELECT id, item_name, item_sku FROM daily_orders WHERE device_type IS NULL OR device_type = 'Other'");
