@@ -732,6 +732,20 @@ async function initDB() {
     console.warn('full_configuration backfill warning:', err.message);
   }
 
+  // Backfill SKUs for all inventory using new format
+  try {
+    const invSkuRows = await dbAll(`SELECT id, model, color, storage, ram, processor, screen_size, year, model_variant, grade, condition_grade, carrier FROM inventory`);
+    if (invSkuRows.length) {
+      await dbTx(async (conn) => {
+        for (const r of invSkuRows) {
+          const newSku = buildSkuFromConfig(r, r.grade || r.condition_grade);
+          if (newSku) await conn.query('UPDATE inventory SET sku = ? WHERE id = ?', [newSku, r.id]);
+        }
+      });
+      console.log(`Regenerated SKUs for ${invSkuRows.length} inventory rows.`);
+    }
+  } catch (err) { console.warn('SKU backfill warning:', err.message); }
+
   const adminExists = await dbGet('SELECT id FROM users WHERE username = ?', ['admin']);
   if (!adminExists) {
     await dbRun('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)', [
