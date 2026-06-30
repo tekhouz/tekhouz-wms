@@ -176,9 +176,7 @@ function gNum(row, ...keys) {
   return 0;
 }
 
-// ─── Full Configuration + SKU Generator (NEW — item #3 / #4) ─────────────────
-// Builds a human-readable "full configuration" string from a device's fields.
-// Works for both `inventory` rows and `po_items` rows since they share field names.
+// ─── Full Configuration + SKU Generator ──────────────────────────────────────
 function buildFullConfiguration(row) {
   const parts = [];
   if (row.model) parts.push(row.model);
@@ -190,16 +188,107 @@ function buildFullConfiguration(row) {
   return parts.join(' / ');
 }
 
-// Builds a SKU string from full config + grade, e.g.:
-//   "MACBOOK-AIR-13-2022-M2-256GB-16GB-STARLIGHT-A"
+// Color abbreviation map (shared with frontend)
+const COLOR_ABBR = {
+  'Space Gray':'SG','Silver':'SL','Gold':'GD','Rose Gold':'RG',
+  'Midnight':'MN','Starlight':'ST','Blue':'BL','Green':'GN',
+  'Purple':'PR','Red':'RD','Black':'BK','White':'WT',
+  'Yellow':'YL','Orange':'OR','Coral':'CO','Pacific Blue':'PB',
+  'Alpine Green':'AG','Deep Purple':'DP','Natural Titanium':'NT',
+  'Black Titanium':'BKT','White Titanium':'WTT','Pink':'PK',
+  'Violet':'VT','Graphite':'GP','Sierra Blue':'SB','Teal':'TL',
+};
+function colorAbbr(c) {
+  if (!c) return '';
+  return COLOR_ABBR[c] || c.replace(/\s+/g,'').slice(0,2).toUpperCase();
+}
+
+// Processor abbreviation: "Apple M2" -> "M2", "Intel Core i7-1260P" -> "i7", "Snapdragon 8 Gen 3" -> "SD8G3"
+function processorAbbr(p) {
+  if (!p) return '';
+  // Apple chips: M1, M2, M3, M4, A15, A17 Pro etc
+  const apple = p.match(/\b(M\d+(?:\s*(?:Pro|Max|Ultra))?|A\d+(?:\s*(?:Pro|Bionic))?)\b/i);
+  if (apple) return apple[1].replace(/\s+/g,'');
+  // Intel i-series
+  const intel = p.match(/i(\d)-\d+/i);
+  if (intel) return 'i' + intel[1];
+  // Snapdragon
+  const sd = p.match(/snapdragon\s*(\d+\s*gen\s*\d+)/i);
+  if (sd) return 'SD' + sd[1].replace(/\s+/g,'');
+  // Fallback: first 6 chars uppercase no spaces
+  return p.replace(/\s+/g,'').slice(0,6).toUpperCase();
+}
+
+// SKU template: PREFIX-ScreenSize-Year-Processor-RAM-Storage-ColorAbbr-Grade
+// Prefixes: MBP, MBA, iPhone, SM (Samsung), GPixel (Google Pixel), iPad, MAC (other Mac)
 function buildSkuFromConfig(row, grade) {
-  const cfg = buildFullConfiguration(row);
-  const slug = (cfg + (grade ? ' ' + grade : ''))
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '-')   // non-alphanumeric -> dash
-    .replace(/^-+|-+$/g, '')      // trim leading/trailing dashes
-    .replace(/-{2,}/g, '-');      // collapse multiple dashes
-  return slug;
+  const model   = (row.model || '').trim();
+  const storage = (row.storage || '').replace(/\s+/g,'');
+  const ram     = (row.ram || '').replace(/\s+/g,'');
+  const color   = colorAbbr(row.color || '');
+  const proc    = processorAbbr(row.processor || '');
+  const screen  = (row.screen_size || '').replace(/\s+/g,'');
+  const year    = row.year ? String(row.year) : '';
+  const variant = (row.model_variant || '').trim();
+  const g       = grade ? String(grade).trim() : '';
+
+  const fullColor = (row.color || '').trim(); // spelled-out color for iPhones
+
+  // iPhone: iPhone16ProMax-128GB-Black-A
+  if (/iphone/i.test(model)) {
+    const num = model.replace(/iphone\s*/i, '').replace(/\s+/g, '');
+    const variantSuffix = variant && !model.toLowerCase().includes(variant.toLowerCase()) ? variant.replace(/\s+/g,'') : '';
+    const prefix = 'iPhone' + num + variantSuffix;
+    const parts = [prefix];
+    if (storage)   parts.push(storage);
+    if (fullColor) parts.push(fullColor);
+    if (g)         parts.push(g);
+    return parts.filter(Boolean).join('-');
+  }
+
+  // iPad: iPad-ScreenSize-Year-Processor-RAM-Storage-Color-Grade
+  if (/ipad/i.test(model)) {
+    const num = model.replace(/ipad\s*/i, '').replace(/\s+/g, '');
+    const variantSuffix = variant && !model.toLowerCase().includes(variant.toLowerCase()) ? variant.replace(/\s+/g,'') : '';
+    const prefix = 'iPad' + num + variantSuffix;
+    const parts = [prefix];
+    if (screen)  parts.push(screen);
+    if (year)    parts.push(year);
+    if (proc)    parts.push(proc);
+    if (ram)     parts.push(ram);
+    if (storage) parts.push(storage);
+    if (color)   parts.push(color);
+    if (g)       parts.push(g);
+    return parts.filter(Boolean).join('-');
+  }
+
+  // Determine prefix for other devices
+  let prefix = '';
+  if (/macbook\s*pro/i.test(model) || (/macbook/i.test(model) && /pro/i.test(variant))) {
+    prefix = 'MBP';
+  } else if (/macbook\s*air/i.test(model) || (/macbook/i.test(model) && /air/i.test(variant))) {
+    prefix = 'MBA';
+  } else if (/macbook/i.test(model)) {
+    prefix = 'MBA';
+  } else if (/samsung/i.test(model) || /galaxy/i.test(model) || /^SM-/i.test(model)) {
+    prefix = 'SM';
+  } else if (/google\s*pixel/i.test(model) || /pixel/i.test(model)) {
+    prefix = 'GPixel';
+  } else {
+    prefix = model.split(/\s+/)[0].replace(/[^A-Za-z0-9]/g, '') || 'DEV';
+  }
+
+  // Universal template: PREFIX-ScreenSize-Year-Processor-RAM-Storage-ColorAbbr-Grade
+  const parts = [prefix];
+  if (screen)  parts.push(screen);
+  if (year)    parts.push(year);
+  if (proc)    parts.push(proc);
+  if (ram)     parts.push(ram);
+  if (storage) parts.push(storage);
+  if (color)   parts.push(color);
+  if (g)       parts.push(g);
+
+  return parts.filter(Boolean).join('-');
 }
 
 // ─── Inventory auto-deduction helper (NEW — fixes orders not deducting stock) ─
@@ -580,6 +669,17 @@ async function initDB() {
     await pool.query(`ALTER TABLE po_items ADD COLUMN full_configuration VARCHAR(500) AFTER model`);
   } catch (e) { /* already exists */ }
 
+  // Auto-migrate new columns
+  for (const col of ['processor VARCHAR(255)', 'screen_size VARCHAR(50)', 'model_variant VARCHAR(50)']) {
+    try { await pool.query(`ALTER TABLE inventory ADD COLUMN ${col}`); } catch(e) {}
+  }
+  for (const col of ['screen_size VARCHAR(50)', 'year INT', 'model_variant VARCHAR(50)',
+    'grade VARCHAR(50)', 'condition_grade VARCHAR(50)', 'lock_status VARCHAR(100)',
+    'carrier VARCHAR(100)', 'missing_components VARCHAR(255)', 'damages VARCHAR(255)',
+    'po_price DECIMAL(10,2)', 'facility VARCHAR(100)', 'remarks VARCHAR(255)']) {
+    try { await pool.query(`ALTER TABLE po_items ADD COLUMN ${col}`); } catch(e) {}
+  }
+
   try {
     const untyped = await dbAll("SELECT id, item_name, item_sku FROM daily_orders WHERE device_type IS NULL OR device_type = 'Other'");
     if (untyped.length > 0) {
@@ -898,6 +998,74 @@ app.delete('/api/orders/:id', auth, adminOnly, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Cancel order — marks as Cancelled in order_testing and reverts inventory
+app.patch('/api/orders/:id/cancel', auth, async (req, res) => {
+  try {
+    await dbTx(async (conn) => {
+      // Revert inventory
+      await conn.query(
+        `UPDATE inventory SET status='available', sold_order_id=NULL, sold_at=NULL WHERE sold_order_id=?`,
+        [req.params.id]
+      );
+      // Update existing test row or insert one with Cancelled status
+      const [existing] = await conn.query(`SELECT id FROM order_testing WHERE order_row_id=?`, [req.params.id]);
+      if (existing.length > 0) {
+        await conn.query(`UPDATE order_testing SET delivery_status='Cancelled' WHERE order_row_id=?`, [req.params.id]);
+      } else {
+        await conn.query(
+          `INSERT INTO order_testing (order_row_id, delivery_status, overall_status) VALUES (?, 'Cancelled', 'Not Tested')`,
+          [req.params.id]
+        );
+      }
+    });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Manual Order Creation ────────────────────────────────────────────────
+app.post('/api/orders/manual', auth, async (req, res) => {
+  try {
+    const { order_id, order_date, item_name, item_sku, serial_no, recipient, qty, price, delivery_status } = req.body;
+    const today = new Date().toISOString().slice(0, 10);
+    await dbTx(async (conn) => {
+      const [result] = await conn.query(
+        `INSERT INTO daily_orders (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, device_type)
+         VALUES (?, 'Manual', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [today, serial_no || '', order_id || '', order_date || today, item_sku || '', item_name || '', recipient || '', qty || 1, price || 0,
+         inferDeviceType(item_name, item_sku)]
+      );
+      const orderId = result.insertId;
+      // Set delivery status in order_testing
+      const ds = delivery_status || 'Pending';
+      await conn.query(
+        `INSERT INTO order_testing (order_row_id, delivery_status, overall_status) VALUES (?, ?, 'Not Tested')
+         ON DUPLICATE KEY UPDATE delivery_status=VALUES(delivery_status)`,
+        [orderId, ds]
+      );
+      // Try to deduct inventory by serial/IMEI
+      let inv_deducted = false, inv_id = null;
+      if (serial_no) {
+        const r = await tryMarkInventorySold(conn, serial_no, orderId);
+        if (r.matched && !r.conflict) { inv_deducted = true; inv_id = r.inventory_id; }
+      }
+      // Fallback: deduct by SKU
+      if (!inv_deducted && item_sku) {
+        const [rows] = await conn.query(
+          `SELECT id FROM inventory WHERE sku = ? AND status = 'available' LIMIT 1`, [item_sku]
+        );
+        if (rows[0]) {
+          await conn.query(
+            `UPDATE inventory SET status='sold', sold_order_id=?, sold_at=NOW() WHERE id=?`,
+            [orderId, rows[0].id]
+          );
+          inv_deducted = true; inv_id = rows[0].id;
+        }
+      }
+      res.json({ success: true, id: orderId, inventory_deducted: inv_deducted, inventory_id: inv_id });
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/orders/bulk-delete', auth, adminOnly, async (req, res) => {
@@ -1265,6 +1433,10 @@ app.get('/api/inventory/export', auth, async (req, res) => {
 app.post('/api/inventory', auth, async (req, res) => {
   try {
     const d = { ...req.body };
+    if (d.serial_number && d.serial_number.trim()) {
+      const dup = await dbGet('SELECT id FROM inventory WHERE serial_number = ?', [d.serial_number.trim()]);
+      if (dup) return res.status(409).json({ error: `Serial number "${d.serial_number}" already exists in inventory (ID #${dup.id})` });
+    }
     if (!d.full_configuration) d.full_configuration = buildFullConfiguration(d);
     if (!d.sku) d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
 
@@ -1282,15 +1454,20 @@ app.post('/api/inventory', auth, async (req, res) => {
 // PATCHED: regenerates full_configuration + sku when specs change
 app.put('/api/inventory/:id', auth, async (req, res) => {
   try {
-    const d = { ...req.body };
-    if (d.model || d.color || d.storage || d.ram) {
-      d.full_configuration = buildFullConfiguration(d);
-      d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
+    const existing = await dbGet('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+    if (req.body.serial_number && req.body.serial_number.trim()) {
+      const dup = await dbGet('SELECT id FROM inventory WHERE serial_number = ? AND id != ?', [req.body.serial_number.trim(), req.params.id]);
+      if (dup) return res.status(409).json({ error: `Serial number "${req.body.serial_number}" already exists in inventory (ID #${dup.id})` });
     }
-    const keys = Object.keys(d).filter(k => k !== 'id' && k !== 'created_at');
+    const d = { ...(existing || {}), ...req.body };
+    d.full_configuration = buildFullConfiguration(d);
+    // Only auto-generate SKU if user didn't explicitly provide one in this request
+    if (!req.body.sku) d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
+    const keys = Object.keys(req.body).filter(k => k !== 'id' && k !== 'created_at');
+    const updateKeys = [...new Set([...keys, 'full_configuration', 'sku'])];
     await dbRun(
-      `UPDATE inventory SET ${keys.map(k=>`${k}=?`).join(', ')} WHERE id = ?`,
-      [...keys.map(k => d[k]), req.params.id]
+      `UPDATE inventory SET ${updateKeys.map(k=>`${k}=?`).join(', ')} WHERE id = ?`,
+      [...updateKeys.map(k => d[k]), req.params.id]
     );
     res.json({ success: true });
   } catch (err) {

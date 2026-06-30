@@ -583,6 +583,7 @@ async function loadOrders() {
               <button class="btn btn-primary btn-sm btn-icon" title="Test / Update" onclick="openOrderTesting(${o.id})">
                 <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
               </button>
+              ${(o.delivery_status||'Pending')!=='Cancelled'?`<button class="btn btn-sm btn-icon" title="Cancel Order" onclick="cancelOrder(${o.id})" style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d">✕</button>`:''}
               ${S.user.role==='admin' ? `<button class="btn btn-danger btn-sm btn-icon" title="Delete" onclick="deleteOrder(${o.id})"><svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg></button>` : ''}
             </div>
           </td>
@@ -611,6 +612,7 @@ async function loadOrders() {
           <button class="btn btn-outline btn-sm" onclick="S.oFilters={date:'',source:'',search:'',delivery:''};S._oTypeTab='all';loadOrders()">Clear</button>
         </div>
         <div class="toolbar-right">
+          <button class="btn btn-success" onclick="showManualOrderModal()">+ New Manual Order</button>
           <button class="btn btn-outline" style="border-color:var(--purple);color:var(--purple)" onclick="openScanModal()">
             <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M3 7V5a2 2 0 012-2h2M17 3h2a2 2 0 012 2v2M21 17v2a2 2 0 01-2 2h-2M7 21H5a2 2 0 01-2-2v-2"/><line x1="7" y1="12" x2="7" y2="12.01"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="17" y1="12" x2="17" y2="12.01"/></svg>
             Scan Barcode
@@ -688,6 +690,59 @@ async function doImportOrders() {
   try {
     const r = await api('POST', '/api/orders/import', fd, true);
     showToast(`✓ Imported ${r.imported} orders for ${shipDate}`);
+    closeModal(); loadOrders();
+  } catch(ex) { showToast(ex.message, 'error'); }
+}
+
+// ─── Manual Order Modal ───────────────────────────────────────────────────
+function showManualOrderModal() {
+  const closeX = `<button class="modal-close" onclick="closeModal()"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
+  openModal(`
+    <div class="modal-header"><h3>New Manual Order</h3>${closeX}</div>
+    <div class="modal-body">
+      <div class="form-grid form-grid-2">
+        <div class="form-group"><label>Order ID</label><input type="text" id="mo-order_id" placeholder="e.g. ORD-001"></div>
+        <div class="form-group"><label>Order Date</label><input type="date" id="mo-order_date" value="${new Date().toISOString().slice(0,10)}"></div>
+        <div class="form-group"><label>Item Name</label><input type="text" id="mo-item_name" placeholder="e.g. MacBook Air M2"></div>
+        <div class="form-group"><label>Item SKU</label><input type="text" id="mo-item_sku" placeholder="SKU"></div>
+        <div class="form-group"><label>Serial No.</label><input type="text" id="mo-serial_no" placeholder="Serial number" onblur="checkSerialDuplicate(this)" style="font-family:monospace"></div>
+        <div class="form-group"><label>Recipient</label><input type="text" id="mo-recipient" placeholder="Customer name"></div>
+        <div class="form-group"><label>Qty</label><input type="number" id="mo-qty" value="1" min="1"></div>
+        <div class="form-group"><label>Price ($)</label><input type="number" id="mo-price" value="0" step="0.01"></div>
+        <div class="form-group"><label>Delivery Status</label>
+          <select id="mo-delivery_status">
+            ${['Pending','Ready to Ship','Shipped','Delivered','Returned','Cancelled'].map(s=>`<option>${s}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-success" onclick="doCreateManualOrder()">Create Order</button>
+    </div>`);
+}
+
+async function doCreateManualOrder() {
+  const gv = id => document.getElementById(id)?.value?.trim() || '';
+  const serial = gv('mo-serial_no');
+  const dup = (S.orders?.list||[]).find(o => o.serial_no && o.serial_no.toLowerCase() === serial.toLowerCase());
+  if (serial && dup) {
+    if (!confirm(`Serial ${serial} is already on order #${dup.order_id}. Continue anyway?`)) return;
+  }
+  const payload = {
+    order_id: gv('mo-order_id'),
+    order_date: gv('mo-order_date'),
+    item_name: gv('mo-item_name'),
+    item_sku: gv('mo-item_sku'),
+    serial_no: serial,
+    recipient: gv('mo-recipient'),
+    qty: parseInt(document.getElementById('mo-qty')?.value) || 1,
+    price: parseFloat(document.getElementById('mo-price')?.value) || 0,
+    delivery_status: gv('mo-delivery_status'),
+  };
+  try {
+    const r = await api('POST', '/api/orders/manual', payload);
+    showToast(r.inventory_deducted ? '✓ Order created · inventory deducted' : '✓ Order created');
     closeModal(); loadOrders();
   } catch(ex) { showToast(ex.message, 'error'); }
 }
@@ -817,6 +872,14 @@ async function deleteOrder(id) {
   if (!confirm('Delete this order?')) return;
   try { await api('DELETE', '/api/orders/' + id); showToast('Order deleted'); loadOrders(); }
   catch(ex) { showToast(ex.message, 'error'); }
+}
+
+async function cancelOrder(id) {
+  if (!confirm('Cancel this order? This will mark it as Cancelled and revert any inventory deduction.')) return;
+  try {
+    await api('PATCH', '/api/orders/' + id + '/cancel');
+    showToast('Order cancelled'); loadOrders();
+  } catch(ex) { showToast(ex.message, 'error'); }
 }
 
 // ─── Barcode Scanner ──────────────────────────────────────────────────────────
@@ -1353,11 +1416,14 @@ async function loadInventory() {
                 <div class="mono" style="font-size:11px;font-weight:600">${esc(item.serial_number||'—')}</div>
                 ${item.imei?`<div class="mono" style="font-size:10px;color:var(--muted)">IMEI: ${esc(item.imei)}</div>`:''}
               </td>
-              <td style="min-width:110px;font-size:11px">
-                ${item.color?`<div style="font-weight:500">${esc(item.color)}</div>`:''}
+              <td style="min-width:140px;font-size:11px">
+                <div style="font-weight:500">${esc(item.color||'—')}${item.model_variant?` · <span style="color:var(--muted)">${esc(item.model_variant)}</span>`:''}</div>
+                ${item.year?`<div style="font-size:10px;color:var(--muted);margin-bottom:2px">${item.year}</div>`:''}
                 <div style="display:flex;gap:3px;flex-wrap:wrap;margin-top:2px">
-                  ${item.storage?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.storage)}</span>`:''}
-                  ${item.ram?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.ram)}</span>`:''}
+                  ${item.storage?`<span class="tag" style="font-size:10px;padding:1px 5px">💾 ${esc(item.storage)}</span>`:''}
+                  ${item.ram?`<span class="tag" style="font-size:10px;padding:1px 5px">🧠 ${esc(item.ram)}</span>`:''}
+                  ${item.processor?`<span class="tag" style="font-size:10px;padding:1px 5px;background:#ede9fe;color:#6d28d9;border-color:#c4b5fd">⚙ ${esc(item.processor)}</span>`:''}
+                  ${item.screen_size?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.screen_size)}</span>`:''}
                   ${item.wifi_cellular?`<span class="tag" style="font-size:10px;padding:1px 5px">${esc(item.wifi_cellular)}</span>`:''}
                 </div>
               </td>
@@ -1382,6 +1448,9 @@ async function loadInventory() {
                   <button id="inv-exp-${item.id}" class="btn btn-outline btn-sm btn-icon" onclick="toggleInvDetail(${item.id})" title="Test details" style="font-size:10px;padding:3px 6px">▶</button>
                   <button class="btn btn-outline btn-sm btn-icon" title="Print Label" onclick="showInventoryLabel(${item.id})" style="color:var(--purple);border-color:var(--purple)">
                     <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+                  </button>
+                  <button class="btn btn-sm btn-icon" title="Edit Item" onclick="showEditInventoryItem(${item.id})" style="background:#dcfce7;color:#15803d;border:1px solid #86efac">
+                    <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                   </button>
                   <button class="btn btn-primary btn-sm btn-icon" title="Test/Update" onclick="openInventoryTesting(${item.id})">
                     <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -1927,6 +1996,39 @@ async function openInventoryTesting(itemId) {
       </div>
 
       <div class="form-section">
+        <div class="form-section-title">Device Specs</div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group"><label>Model</label><input type="text" id="t-model" value="${esc(item.model||'')}" placeholder="e.g. iPhone 16, MacBook Air M2"></div>
+          <div class="form-group"><label>Variant (Pro/Air/etc)</label>
+            <select id="t-model_variant">
+              ${['','Air','Pro','Pro Max','Mini','Plus','Ultra'].map(v=>`<option value="${v}" ${(item.model_variant||'')=== v?'selected':''}>${v||'—'}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Year</label><input type="number" id="t-year" value="${item.year||new Date().getFullYear()}" min="2010" max="2030"></div>
+          <div class="form-group"><label>Processor / Chip</label><input type="text" id="t-processor" value="${esc(item.processor||'')}" placeholder="e.g. A18, M2, Snapdragon 8 Gen 3"></div>
+          <div class="form-group"><label>RAM</label>
+            <select id="t-ram">
+              <option value="">—</option>
+              ${(S.catalog?.ram||['2GB','3GB','4GB','6GB','8GB','12GB','16GB','24GB','32GB','64GB','96GB','128GB']).map(r=>`<option value="${esc(r)}" ${(item.ram||'')=== r?'selected':''}>${esc(r)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Storage / SSD</label>
+            <select id="t-storage">
+              <option value="">—</option>
+              ${(S.catalog?.storage||['8GB','16GB','32GB','64GB','128GB','256GB','512GB','1TB','2TB','4TB']).map(s=>`<option value="${esc(s)}" ${(item.storage||'')=== s?'selected':''}>${esc(s)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Screen Size</label><input type="text" id="t-screen_size" value="${esc(item.screen_size||'')}" placeholder="e.g. 6.1-inch, 13-inch"></div>
+          <div class="form-group"><label>Grade</label>
+            <select id="t-grade">
+              <option value="">—</option>
+              ${['A','B','C','D','New','New Open Box'].map(g=>`<option value="${g}" ${(item.grade||'')=== g?'selected':''}>${g}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="form-section">
         <div class="form-section-title">Device & Overall Results</div>
         <div class="form-grid form-grid-4">
           <div class="form-group">
@@ -2033,12 +2135,20 @@ async function saveInventoryTesting(itemId) {
   const bc = gv('t-battery_cycles'); if (bc) payload.battery_cycles = parseInt(bc);
   fields.forEach(f => { payload[f.key] = gv('t-' + f.key) || 'Not Tested'; });
 
-  // Also update inventory item fields: serial, imei, lock_status, carrier, and SKU grade
+  // Also update inventory item fields: serial, imei, lock_status, carrier, specs, and SKU grade
   const invUpdate = {};
   const sn = gv('t-serial_number'); if (sn !== undefined) invUpdate.serial_number = sn;
   const im = gv('t-imei'); if (im !== undefined) invUpdate.imei = im;
   const lockStatus = gv('t-lock_status'); if (lockStatus !== undefined) invUpdate.lock_status = lockStatus;
   const carrier = gv('t-locked_carrier'); if (carrier !== undefined) invUpdate.carrier = carrier;
+  const tModel = gv('t-model'); if (tModel) invUpdate.model = tModel;
+  const tVariant = gv('t-model_variant'); if (tVariant !== undefined) invUpdate.model_variant = tVariant;
+  const tYear = document.getElementById('t-year')?.value; if (tYear) invUpdate.year = parseInt(tYear);
+  const tProcessor = gv('t-processor'); if (tProcessor !== undefined) invUpdate.processor = tProcessor;
+  const tRam = gv('t-ram'); if (tRam !== undefined) invUpdate.ram = tRam;
+  const tStorage = gv('t-storage'); if (tStorage !== undefined) invUpdate.storage = tStorage;
+  const tScreenSize = gv('t-screen_size'); if (tScreenSize !== undefined) invUpdate.screen_size = tScreenSize;
+  const tGrade = gv('t-grade'); if (tGrade !== undefined) invUpdate.grade = tGrade;
 
   // Auto-update SKU: apply color abbreviation then grade segment
   const newGrade = gv('t-overall_grade');
@@ -2060,6 +2170,150 @@ async function saveInventoryTesting(itemId) {
     await api('POST', `/api/inventory/${itemId}/testing`, payload);
     showToast('✓ Testing results saved'); closeModal(); loadInventory();
   } catch(ex) { showToast(ex.message, 'error'); }
+}
+
+function showEditInventoryItem(itemId) {
+  const item = S.inventory.items.find(i => i.id === itemId);
+  if (!item) return;
+  const closeX = `<button class="modal-close" onclick="closeModal()"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  openModal(`
+    <div class="modal-header"><h3>Edit Item — ${esc(item.model||'Item')}</h3>${closeX}</div>
+    <div class="modal-body">
+      <div class="form-section">
+        <div class="form-section-title">Source Info</div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group"><label>Vendor</label><input type="text" id="ei-vendor" value="${esc(item.vendor||'')}" placeholder="Vendor name"></div>
+          <div class="form-group"><label>Month</label>
+            <select id="ei-month">${months.map(m=>`<option ${(item.month||'')=== m?'selected':''}>${m}</option>`).join('')}</select>
+          </div>
+          <div class="form-group"><label>Year</label><input type="number" id="ei-year" value="${item.year||new Date().getFullYear()}" min="2010" max="2030"></div>
+        </div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group"><label>Device Type</label>
+            <select id="ei-device_type">${['iPhone','Smartphone','MacBook','Laptop','iPad','Gaming Console','Smartwatch','Other'].map(t=>`<option ${(item.device_type||'')=== t?'selected':''}>${t}</option>`).join('')}</select>
+          </div>
+          <div class="form-group"><label>Lot ID</label><input type="text" id="ei-lot_id" value="${esc(item.lot_id||'')}" placeholder="e.g. LOT-2024-001"></div>
+          <div class="form-group"><label>Invoice No.</label><input type="text" id="ei-invoice_no" value="${esc(item.invoice_no||'')}" placeholder="Invoice number"></div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Device Details</div>
+        <div class="form-grid form-grid-2">
+          <div class="form-group"><label>Model</label><input type="text" id="ei-model" value="${esc(item.model||'')}" placeholder="e.g. iPhone 15 Pro, MacBook Air M2"></div>
+          <div class="form-group"><label>Description</label><input type="text" id="ei-description" value="${esc(item.description||'')}" placeholder="Full device description"></div>
+        </div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group"><label>Serial Number</label><input type="text" id="ei-serial_number" value="${esc(item.serial_number||'')}" placeholder="S/N" style="font-family:monospace"></div>
+          <div class="form-group"><label>IMEI</label><input type="text" id="ei-imei" value="${esc(item.imei||'')}" placeholder="IMEI" style="font-family:monospace"></div>
+          <div class="form-group"><label>Manufacturer</label><input type="text" id="ei-manufacturer" value="${esc(item.manufacturer||item.brand||'')}" placeholder="e.g. Apple, Samsung"></div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Specifications</div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group"><label>Color</label><input type="text" id="ei-color" value="${esc(item.color||'')}" placeholder="e.g. Space Gray, Silver"></div>
+          <div class="form-group"><label>Storage / SSD</label>
+            <select id="ei-storage">
+              <option value="">—</option>
+              ${(S.catalog?.storage||['8GB','16GB','32GB','64GB','128GB','256GB','512GB','1TB','2TB','4TB']).map(s=>`<option value="${esc(s)}" ${(item.storage||'')=== s?'selected':''}>${esc(s)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>RAM</label>
+            <select id="ei-ram">
+              <option value="">—</option>
+              ${(S.catalog?.ram||['2GB','3GB','4GB','6GB','8GB','12GB','16GB','24GB','32GB','64GB','96GB','128GB']).map(r=>`<option value="${esc(r)}" ${(item.ram||'')=== r?'selected':''}>${esc(r)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Processor / Chip</label><input type="text" id="ei-processor" value="${esc(item.processor||'')}" placeholder="e.g. M2, i7-1260P"></div>
+          <div class="form-group"><label>Screen Size</label><input type="text" id="ei-screen_size" value="${esc(item.screen_size||'')}" placeholder="e.g. 13-inch, 6.1-inch"></div>
+          <div class="form-group"><label>Variant (Pro/Air/etc)</label>
+            <select id="ei-model_variant">
+              ${['','Air','Pro','Pro Max','Mini','Plus','Ultra'].map(v=>`<option value="${v}" ${(item.model_variant||'')=== v?'selected':''}>${v||'—'}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>WiFi / Cellular</label>
+            <select id="ei-wifi_cellular">
+              <option value="">—</option>
+              ${['WiFi Only','WiFi + Cellular','5G','4G LTE','N/A'].map(v=>`<option ${(item.wifi_cellular||'')=== v?'selected':''}>${v}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Condition</div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group"><label>Grade</label>
+            <select id="ei-grade">
+              <option value="">—</option>
+              ${['A','B','C','D','New','New Open Box'].map(g=>`<option value="${g}" ${(item.grade||'')=== g?'selected':''}>${g}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Lock Status</label>
+            <select id="ei-lock_status">
+              <option value="">—</option>
+              ${['Unlocked','Locked','iCloud Locked','Carrier Locked'].map(v=>`<option ${(item.lock_status||'')=== v?'selected':''}>${v}</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group"><label>Carrier</label><input type="text" id="ei-carrier" value="${esc(item.carrier||'')}" placeholder="e.g. Unlocked, T-Mobile"></div>
+          <div class="form-group"><label>Missing Components</label><input type="text" id="ei-missing_components" value="${esc(item.missing_components||'')}" placeholder="e.g. AC Adapter, Box"></div>
+          <div class="form-group"><label>Damages</label><input type="text" id="ei-damages" value="${esc(item.damages||'')}" placeholder="e.g. Minor scratches"></div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Pricing & Other</div>
+        <div class="form-grid form-grid-3">
+          <div class="form-group" style="grid-column:1/-1"><label>SKU <span style="font-size:11px;color:var(--muted);font-weight:400">(auto-generated — edit to override)</span></label><input type="text" id="ei-sku" value="${esc(item.sku||'')}" placeholder="Auto-generated from specs" style="font-family:monospace"></div>
+          <div class="form-group"><label>Price ($)</label><input type="number" id="ei-price" value="${item.price||''}" step="0.01" placeholder="0.00"></div>
+          <div class="form-group"><label>PO Price ($)</label><input type="number" id="ei-po_price" value="${item.po_price||''}" step="0.01" placeholder="0.00"></div>
+          <div class="form-group"><label>Facility</label><input type="text" id="ei-facility" value="${esc(item.facility||'')}" placeholder="e.g. GA, CA"></div>
+          <div class="form-group"><label>Remarks</label><input type="text" id="ei-remarks" value="${esc(item.remarks||'')}" placeholder="Any notes"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doEditInventoryItem(${itemId})">Save Changes</button>
+    </div>`);
+}
+
+async function doEditInventoryItem(itemId) {
+  const gv = id => document.getElementById(id)?.value?.trim() || '';
+  const payload = {
+    vendor: gv('ei-vendor'), month: gv('ei-month'),
+    year: parseInt(document.getElementById('ei-year')?.value) || null,
+    device_type: gv('ei-device_type'), lot_id: gv('ei-lot_id'), invoice_no: gv('ei-invoice_no'),
+    model: gv('ei-model'), description: gv('ei-description'),
+    serial_number: gv('ei-serial_number'), imei: gv('ei-imei'), manufacturer: gv('ei-manufacturer'),
+    color: gv('ei-color'), storage: gv('ei-storage'), ram: gv('ei-ram'),
+    processor: gv('ei-processor'), screen_size: gv('ei-screen_size'),
+    model_variant: gv('ei-model_variant'), wifi_cellular: gv('ei-wifi_cellular'),
+    grade: gv('ei-grade'),
+    lock_status: gv('ei-lock_status'), carrier: gv('ei-carrier'),
+    missing_components: gv('ei-missing_components'), damages: gv('ei-damages'),
+    sku: gv('ei-sku') || null,
+    price: parseFloat(document.getElementById('ei-price')?.value) || null,
+    po_price: parseFloat(document.getElementById('ei-po_price')?.value) || null,
+    facility: gv('ei-facility'), remarks: gv('ei-remarks'),
+  };
+  try {
+    await api('PUT', `/api/inventory/${itemId}`, payload);
+    showToast('✓ Item updated'); closeModal(); loadInventory();
+  } catch(ex) { showToast(ex.message, 'error'); }
+}
+
+function checkSerialDuplicate(input) {
+  const val = input.value.trim();
+  if (!val) return;
+  const dup = (S.orders?.list||[]).find(o => o.serial_no && o.serial_no.toLowerCase() === val.toLowerCase());
+  if (dup) {
+    input.style.borderColor = '#f59e0b';
+    input.style.background = '#fffbeb';
+    showToast('⚠ Serial ' + val + ' already used on order #' + dup.order_id, 'error');
+  } else {
+    input.style.borderColor = '';
+    input.style.background = '';
+  }
 }
 
 // ─── USERS ─────────────────────────────────────────────────────────────────
@@ -2738,6 +2992,34 @@ function poItemModalBody(item) {
         <div class="form-group"><label>Unit Price ($)</label><input type="number" id="pi-unit_price" value="${item?.unit_price||0}" step="0.01" min="0"></div>
       </div>
     </div>
+    <div class="form-section">
+      <div class="form-section-title">Condition</div>
+      <div class="form-grid form-grid-3">
+        <div class="form-group"><label>Grade</label>
+          <select id="pi-grade">
+            <option value="">—</option>
+            ${['A','B','C','D','New','New Open Box'].map(g=>`<option value="${g}" ${(item?.grade||'')=== g?'selected':''}>${g}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label>Lock Status</label>
+          <select id="pi-lock_status">
+            <option value="">—</option>
+            ${['Unlocked','Locked','iCloud Locked','Carrier Locked'].map(v=>`<option ${(item?.lock_status||'')=== v?'selected':''}>${v}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group"><label>Carrier</label><input type="text" id="pi-carrier" value="${esc(item?.carrier||'')}" placeholder="e.g. Unlocked, T-Mobile"></div>
+        <div class="form-group"><label>Missing Components</label><input type="text" id="pi-missing_components" value="${esc(item?.missing_components||'')}" placeholder="e.g. AC Adapter, Box"></div>
+        <div class="form-group"><label>Damages</label><input type="text" id="pi-damages" value="${esc(item?.damages||'')}" placeholder="e.g. Minor scratches"></div>
+      </div>
+    </div>
+    <div class="form-section">
+      <div class="form-section-title">Other</div>
+      <div class="form-grid form-grid-3">
+        <div class="form-group"><label>PO Price ($)</label><input type="number" id="pi-po_price" value="${item?.po_price||''}" step="0.01" placeholder="0.00"></div>
+        <div class="form-group"><label>Facility</label><input type="text" id="pi-facility" value="${esc(item?.facility||'')}" placeholder="e.g. GA, CA"></div>
+        <div class="form-group"><label>Remarks</label><input type="text" id="pi-remarks" value="${esc(item?.remarks||'')}" placeholder="Any notes"></div>
+      </div>
+    </div>
     <div class="form-group"><label>Notes</label><textarea id="pi-notes" placeholder="Additional notes…">${esc(item?.notes||'')}</textarea></div>`;
 }
 
@@ -2758,6 +3040,11 @@ function getPOItemPayload(poId) {
     serial_number: gv('pi-serial_number'), imei: gv('pi-imei'),
     color: gv('pi-color'), ram: gv('pi-ram'), storage: gv('pi-storage'),
     processor: gv('pi-processor'), wifi_cellular: gv('pi-wifi_cellular'),
+    grade: gv('pi-grade'),
+    lock_status: gv('pi-lock_status'), carrier: gv('pi-carrier'),
+    missing_components: gv('pi-missing_components'), damages: gv('pi-damages'),
+    po_price: parseFloat(document.getElementById('pi-po_price')?.value)||null,
+    facility: gv('pi-facility'), remarks: gv('pi-remarks'),
     qty: parseInt(document.getElementById('pi-qty')?.value)||1,
     unit_price: parseFloat(document.getElementById('pi-unit_price')?.value)||0,
     notes: gv('pi-notes')
