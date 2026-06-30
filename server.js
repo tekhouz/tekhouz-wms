@@ -787,8 +787,15 @@ app.get('/api/orders', auth, async (req, res) => {
     const { date, source, search, delivery, page = 1, limit = 100 } = req.query;
     let q = `SELECT o.*, COALESCE(t.delivery_status,'Pending') delivery_status,
              t.cosmetic_grade, t.overall_status, t.id test_id, t.tested_by, t.test_date, t.notes,
-             t.device_type AS testing_device_type
-             FROM daily_orders o LEFT JOIN order_testing t ON o.id = t.order_row_id WHERE 1=1`;
+             t.device_type AS testing_device_type,
+             i.model AS inv_model, i.color AS inv_color, i.storage AS inv_storage,
+             i.ram AS inv_ram, i.processor AS inv_processor, i.full_configuration AS inv_full_config,
+             COALESCE(it.overall_grade, i.grade) AS inv_grade
+             FROM daily_orders o
+             LEFT JOIN order_testing t ON o.id = t.order_row_id
+             LEFT JOIN inventory i ON i.sold_order_id = o.id
+             LEFT JOIN inventory_testing it ON it.inventory_id = i.id
+             WHERE 1=1`;
     const p = [];
     if (date) { q += ' AND o.import_date = ?'; p.push(date); }
     if (source) { q += ' AND o.source = ?'; p.push(source); }
@@ -893,7 +900,14 @@ app.post('/api/orders/import', auth, upload.single('file'), async (req, res) => 
 
 app.delete('/api/orders/:id', auth, adminOnly, async (req, res) => {
   try {
-    await dbRun('DELETE FROM daily_orders WHERE id = ?', [req.params.id]);
+    await dbTx(async (conn) => {
+      // Revert any inventory items that were sold against this order
+      await conn.query(
+        `UPDATE inventory SET status='available', sold_order_id=NULL, sold_at=NULL WHERE sold_order_id=?`,
+        [req.params.id]
+      );
+      await conn.query('DELETE FROM daily_orders WHERE id = ?', [req.params.id]);
+    });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -905,8 +919,14 @@ app.post('/api/orders/bulk-delete', auth, adminOnly, async (req, res) => {
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) return res.status(400).json({ error: 'No IDs provided' });
     const placeholders = ids.map(() => '?').join(',');
-    const result = await dbRun(`DELETE FROM daily_orders WHERE id IN (${placeholders})`, ids);
-    res.json({ deleted: result.affectedRows });
+    await dbTx(async (conn) => {
+      await conn.query(
+        `UPDATE inventory SET status='available', sold_order_id=NULL, sold_at=NULL WHERE sold_order_id IN (${placeholders})`,
+        ids
+      );
+      await conn.query(`DELETE FROM daily_orders WHERE id IN (${placeholders})`, ids);
+    });
+    res.json({ deleted: ids.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1265,6 +1285,11 @@ app.get('/api/inventory/export', auth, async (req, res) => {
 app.post('/api/inventory', auth, async (req, res) => {
   try {
     const d = { ...req.body };
+    // Serial uniqueness check
+    if (d.serial_number && d.serial_number.trim()) {
+      const dup = await dbGet('SELECT id FROM inventory WHERE serial_number = ?', [d.serial_number.trim()]);
+      if (dup) return res.status(409).json({ error: `Serial number "${d.serial_number}" already exists in inventory (ID #${dup.id})` });
+    }
     if (!d.full_configuration) d.full_configuration = buildFullConfiguration(d);
     if (!d.sku) d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
 
@@ -1282,15 +1307,23 @@ app.post('/api/inventory', auth, async (req, res) => {
 // PATCHED: regenerates full_configuration + sku when specs change
 app.put('/api/inventory/:id', auth, async (req, res) => {
   try {
-    const d = { ...req.body };
-    if (d.model || d.color || d.storage || d.ram) {
-      d.full_configuration = buildFullConfiguration(d);
-      d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
+    // Fetch existing record so we can merge before rebuilding config/SKU
+    const existing = await dbGet('SELECT * FROM inventory WHERE id = ?', [req.params.id]);
+    // Serial uniqueness check (exclude self)
+    if (req.body.serial_number && req.body.serial_number.trim()) {
+      const dup = await dbGet('SELECT id FROM inventory WHERE serial_number = ? AND id != ?', [req.body.serial_number.trim(), req.params.id]);
+      if (dup) return res.status(409).json({ error: `Serial number "${req.body.serial_number}" already exists in inventory (ID #${dup.id})` });
     }
-    const keys = Object.keys(d).filter(k => k !== 'id' && k !== 'created_at');
+    const d = { ...(existing || {}), ...req.body };
+    // Always regenerate full_configuration and sku from merged data
+    d.full_configuration = buildFullConfiguration(d);
+    d.sku = buildSkuFromConfig(d, d.grade || d.condition_grade);
+    const keys = Object.keys(req.body).filter(k => k !== 'id' && k !== 'created_at');
+    // Always include full_configuration and sku in the update
+    const updateKeys = [...new Set([...keys, 'full_configuration', 'sku'])];
     await dbRun(
-      `UPDATE inventory SET ${keys.map(k=>`${k}=?`).join(', ')} WHERE id = ?`,
-      [...keys.map(k => d[k]), req.params.id]
+      `UPDATE inventory SET ${updateKeys.map(k=>`${k}=?`).join(', ')} WHERE id = ?`,
+      [...updateKeys.map(k => d[k]), req.params.id]
     );
     res.json({ success: true });
   } catch (err) {
@@ -1631,9 +1664,9 @@ app.post('/api/po-items', auth, async (req, res) => {
     if (!d.sku) d.sku = buildSkuFromConfig(d, null);
 
     const result = await dbRun(
-      `INSERT INTO po_items (po_id,device_type,brand,model,full_configuration,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes,receive_status)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [d.po_id,d.device_type||'',d.brand||'',d.model||'',d.full_configuration||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',d.receive_status||'Pending']
+      `INSERT INTO po_items (po_id,device_type,brand,model,full_configuration,sku,description,serial_number,imei,color,ram,storage,processor,wifi_cellular,qty,unit_price,notes,receive_status,screen_size,year,model_variant,grade,condition_grade,lock_status,carrier,missing_components,damages,po_price,facility,remarks)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [d.po_id,d.device_type||'',d.brand||'',d.model||'',d.full_configuration||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',d.receive_status||'Pending',d.screen_size||'',d.year||null,d.model_variant||'',d.grade||'',d.condition_grade||'',d.lock_status||'',d.carrier||'',d.missing_components||'',d.damages||'',d.po_price||null,d.facility||'',d.remarks||'']
     );
     res.json({ success: true, id: result.insertId });
   } catch (err) {
@@ -1650,8 +1683,8 @@ app.put('/api/po-items/:id', auth, async (req, res) => {
       d.sku = buildSkuFromConfig(d, null);
     }
     await dbRun(
-      `UPDATE po_items SET device_type=?,brand=?,model=?,full_configuration=?,sku=?,description=?,serial_number=?,imei=?,color=?,ram=?,storage=?,processor=?,wifi_cellular=?,qty=?,unit_price=?,notes=?,receive_status=? WHERE id=?`,
-      [d.device_type||'',d.brand||'',d.model||'',d.full_configuration||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',d.receive_status||'Pending',req.params.id]
+      `UPDATE po_items SET device_type=?,brand=?,model=?,full_configuration=?,sku=?,description=?,serial_number=?,imei=?,color=?,ram=?,storage=?,processor=?,wifi_cellular=?,qty=?,unit_price=?,notes=?,receive_status=?,screen_size=?,year=?,model_variant=?,grade=?,condition_grade=?,lock_status=?,carrier=?,missing_components=?,damages=?,po_price=?,facility=?,remarks=? WHERE id=?`,
+      [d.device_type||'',d.brand||'',d.model||'',d.full_configuration||'',d.sku||'',d.description||'',d.serial_number||'',d.imei||'',d.color||'',d.ram||'',d.storage||'',d.processor||'',d.wifi_cellular||'',d.qty||1,d.unit_price||0,d.notes||'',d.receive_status||'Pending',d.screen_size||'',d.year||null,d.model_variant||'',d.grade||'',d.condition_grade||'',d.lock_status||'',d.carrier||'',d.missing_components||'',d.damages||'',d.po_price||null,d.facility||'',d.remarks||'',req.params.id]
     );
     res.json({ success: true });
   } catch (err) {
@@ -2509,6 +2542,64 @@ app.get('/api/shop/inventory', async (req, res) => {
   } catch (err) {
     console.error('shop/inventory error:', err.message);
     res.status(500).json({ error: 'Failed to load inventory' });
+  }
+});
+
+// ─── Manual Order Creation ────────────────────────────────────────────────────
+app.post('/api/orders/manual', auth, async (req, res) => {
+  try {
+    const b = req.body;
+    const today = new Date().toISOString().split('T')[0];
+    let orderId = null;
+    let inventoryDeducted = false;
+    let matchedInventoryId = null;
+
+    await dbTx(async (conn) => {
+      const [result] = await conn.query(
+        `INSERT INTO daily_orders (import_date, source, serial_no, order_id, order_date, item_sku, item_name, recipient, qty, price, shipping_paid, device_type)
+         VALUES (?, 'Manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          b.order_date || today,
+          b.serial_no || null,
+          b.order_id || null,
+          b.order_date || today,
+          b.item_sku || null,
+          b.item_name || null,
+          b.recipient || null,
+          parseInt(b.qty) || 1,
+          parseFloat(b.price) || 0,
+          parseFloat(b.shipping_paid) || 0,
+          inferDeviceType(b.item_name || '', b.item_sku || '')
+        ]
+      );
+      orderId = result.insertId;
+
+      // Deduct by serial/IMEI first
+      if (b.serial_no) {
+        const r = await tryMarkInventorySold(conn, b.serial_no, orderId);
+        if (r.matched && !r.conflict) { inventoryDeducted = true; matchedInventoryId = r.inventory_id; }
+      }
+
+      // Fallback: deduct first available inventory item matching the SKU
+      if (!inventoryDeducted && b.item_sku) {
+        const [invRows] = await conn.query(
+          `SELECT id FROM inventory WHERE sku = ? AND status = 'available' ORDER BY created_at ASC LIMIT 1`,
+          [b.item_sku]
+        );
+        if (invRows[0]) {
+          await conn.query(
+            `UPDATE inventory SET status='sold', sold_order_id=?, sold_at=NOW() WHERE id=?`,
+            [orderId, invRows[0].id]
+          );
+          inventoryDeducted = true;
+          matchedInventoryId = invRows[0].id;
+        }
+      }
+    });
+
+    res.json({ id: orderId, success: true, inventory_deducted: inventoryDeducted, inventory_id: matchedInventoryId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
