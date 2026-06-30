@@ -236,11 +236,17 @@ function buildSkuFromConfig(row, grade) {
   const carrier   = (row.carrier || '').replace(/\s+/g,'').replace(/[^A-Za-z0-9]/g,''); // e.g. "Tmobile"
 
   // Helper: build phone-style SKU — PREFIX+ModelNum+Variant-Storage-FullColor-Grade(-Carrier)
-  function phoneSku(prefix) {
+  function phoneSku(prefix, stripPatterns) {
     // Strip device name from model to get just the number/variant: "iPhone 15 Pro Max" -> "15ProMax"
-    const stripped = model.replace(new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*','i'),'').replace(/\s+/g,'');
+    const patterns = stripPatterns || [prefix];
+    let stripped = model;
+    for (const p of patterns) {
+      stripped = stripped.replace(new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*','i'),'');
+    }
+    stripped = stripped.replace(/\s+/g,'');
     const variantSuffix = variant && !stripped.toLowerCase().includes(variant.toLowerCase()) ? variant.replace(/\s+/g,'') : '';
-    const parts = [prefix + stripped + variantSuffix];
+    const modelPart = stripped + variantSuffix;
+    const parts = [prefix + (modelPart ? '-' + modelPart : '')];
     if (storage)   parts.push(storage);
     if (fullColor) parts.push(fullColor);
     if (g)         parts.push(g);
@@ -248,17 +254,17 @@ function buildSkuFromConfig(row, grade) {
     return parts.filter(Boolean).join('-');
   }
 
-  // iPhone: iPhone15ProMax-256GB-Black-A
-  if (/iphone/i.test(model)) return phoneSku('iPhone');
+  // iPhone: iPhone-15ProMax-256GB-Black-A
+  if (/iphone/i.test(model)) return phoneSku('iPhone', ['iPhone']);
 
   // iPad: iPad-Storage-FullColor-Grade
-  if (/ipad/i.test(model)) return phoneSku('iPad');
+  if (/ipad/i.test(model)) return phoneSku('iPad', ['iPad']);
 
-  // Google Pixel: GPixel-7Pro-128GB-Black-A(-Tmobile)
-  if (/google\s*pixel/i.test(model) || /pixel/i.test(model)) return phoneSku('GPixel');
+  // Google Pixel: GPixel-9Pro-128GB-Black-A(-Tmobile)
+  if (/google\s*pixel/i.test(model) || /pixel/i.test(model)) return phoneSku('GPixel', ['Google Pixel', 'Pixel']);
 
   // Samsung: SM-S22-128GB-Purple-A  or  SM-128GB-Black-A
-  if (/samsung/i.test(model) || /galaxy/i.test(model) || /^SM-/i.test(model)) return phoneSku('SM');
+  if (/samsung/i.test(model) || /galaxy/i.test(model) || /^SM-/i.test(model)) return phoneSku('SM', ['Samsung Galaxy', 'Samsung', 'Galaxy', 'SM-']);
 
   // MacBook Pro: MBP-13"-2020-M1-16GB-256GB-SL-B
   if (/macbook\s*pro/i.test(model) || (/macbook/i.test(model) && /pro/i.test(variant))) {
