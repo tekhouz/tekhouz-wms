@@ -54,12 +54,17 @@ app.use(express.static(path.join(__dirname, 'public')));
 const SHOP_ALLOWED_ORIGINS = [
   'https://shop.tekhouz.com',
   'https://tekhouz.com',
-  'http://localhost:3000'
+  'https://tekhouse.shop',
+  'https://www.tekhouse.shop',
+  'http://localhost:3000',
+  'http://localhost:5500',
+  'http://127.0.0.1:5500'
 ];
 app.use('/api/shop', (req, res, next) => {
   const origin = req.headers.origin;
-  if (SHOP_ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
+  // Allow file:// (no origin header) for local dev, and listed domains
+  if (!origin || SHOP_ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -2688,7 +2693,7 @@ app.get('/api/shop/inventory', async (req, res) => {
       const d = (deviceType || '').toLowerCase();
       if (d.includes('iphone')) return 'iphone';
       if (d.includes('macbook') || d === 'laptop') return 'macbook';
-      if (d.includes('samsung') || d.includes('android')) return 'android';
+      if (d.includes('samsung') || d.includes('android') || d.includes('pixel') || d.includes('google')) return 'android';
       if (d.includes('surface')) return 'surface';
       if (d.includes('ipad') || d.includes('tablet')) return 'ipad';
       return 'other';
