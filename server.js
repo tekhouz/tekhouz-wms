@@ -6,8 +6,8 @@ const XLSX = require('xlsx');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2/promise');
-const { Resend } = require('resend');
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resend = null;
+try { const { Resend } = require('resend'); resend = new Resend(process.env.RESEND_API_KEY); } catch(e) { console.warn('Resend not available:', e.message); }
 
 const fs = require('fs');
 const app = express();
