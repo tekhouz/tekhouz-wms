@@ -6,6 +6,8 @@ const XLSX = require('xlsx');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mysql = require('mysql2/promise');
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const fs = require('fs');
 const app = express();
@@ -68,8 +70,8 @@ app.use('/api/shop', (req, res, next) => {
   if (!origin || SHOP_ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin || '*');
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
