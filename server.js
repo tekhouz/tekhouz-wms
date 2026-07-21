@@ -2684,7 +2684,7 @@ app.get('/api/shop/inventory', async (req, res) => {
         COUNT(*) AS qty
       FROM inventory i
       LEFT JOIN inventory_testing t ON i.id = t.inventory_id
-      WHERE i.status = 'available'
+      WHERE i.status IN ('available', 'fixable', 'needs_repair')
         AND i.price > 0
       GROUP BY i.device_type, i.model, i.color, i.storage, i.ram,
                COALESCE(t.overall_grade, i.grade, 'B'), i.price
@@ -2707,7 +2707,7 @@ app.get('/api/shop/inventory', async (req, res) => {
       color: r.color || '',
       storage: r.storage || '',
       ram: r.ram || '',
-      grade: (r.grade || 'B').toString().charAt(0).toUpperCase(),
+      grade: ((r.grade || 'B').toString().match(/[A-Da-d]/)?.[0] || 'B').toUpperCase(),
       qty: Number(r.qty),
       price: Math.round(Number(r.price))
     }));
