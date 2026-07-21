@@ -667,6 +667,37 @@ async function initDB() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS shop_customers (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      first_name VARCHAR(100),
+      last_name VARCHAR(100),
+      email VARCHAR(200) UNIQUE NOT NULL,
+      password_hash VARCHAR(255) NOT NULL,
+      phone VARCHAR(50),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS shop_orders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      paypal_order_id VARCHAR(100) UNIQUE,
+      paypal_capture_id VARCHAR(100),
+      status VARCHAR(50) DEFAULT 'pending',
+      customer_name VARCHAR(200),
+      customer_email VARCHAR(200),
+      customer_phone VARCHAR(50),
+      shipping_address TEXT,
+      items JSON,
+      subtotal DECIMAL(10,2),
+      total DECIMAL(10,2),
+      currency VARCHAR(10) DEFAULT 'USD',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS service_order_parts (
       id INT AUTO_INCREMENT PRIMARY KEY,
       service_order_id INT NOT NULL,
@@ -2728,6 +2759,179 @@ app.get('/api/shop/inventory', async (req, res) => {
   } catch (err) {
     console.error('shop/inventory error:', err.message);
     res.status(500).json({ error: 'Failed to load inventory' });
+  }
+});
+
+// ─── PayPal Helpers ───────────────────────────────────────────────────────────
+const PAYPAL_BASE = process.env.PAYPAL_MODE === 'live'
+  ? 'https://api-m.paypal.com'
+  : 'https://api-m.sandbox.paypal.com';
+
+async function paypalAccessToken() {
+  const creds = Buffer.from(
+    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`
+  ).toString('base64');
+  const res = await fetch(`${PAYPAL_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'grant_type=client_credentials'
+  });
+  const data = await res.json();
+  if (!data.access_token) throw new Error('PayPal auth failed');
+  return data.access_token;
+}
+
+// POST /api/shop/create-order  — called when buyer clicks PayPal button
+app.post('/api/shop/create-order', async (req, res) => {
+  try {
+    const { items, customer } = req.body;
+    if (!items || !items.length) return res.status(400).json({ error: 'No items' });
+
+    const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
+    const total = subtotal; // add shipping/tax here later
+
+    const token = await paypalAccessToken();
+    const ppRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [{
+          amount: { currency_code: 'USD', value: total.toFixed(2) },
+          description: `Tekhouz order — ${items.length} item(s)`
+        }]
+      })
+    });
+    const order = await ppRes.json();
+    if (!order.id) return res.status(500).json({ error: 'PayPal order creation failed', detail: order });
+
+    // Save pending order to DB
+    await dbRun(
+      `INSERT INTO shop_orders (paypal_order_id, status, customer_name, customer_email, customer_phone, items, subtotal, total)
+       VALUES (?, 'pending', ?, ?, ?, ?, ?, ?)`,
+      [order.id, customer?.name || '', customer?.email || '', customer?.phone || '',
+       JSON.stringify(items), subtotal, total]
+    );
+
+    res.json({ id: order.id });
+  } catch (err) {
+    console.error('create-order error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/shop/capture-order  — called after buyer approves on PayPal
+app.post('/api/shop/capture-order', async (req, res) => {
+  try {
+    const { orderID } = req.body;
+    if (!orderID) return res.status(400).json({ error: 'Missing orderID' });
+
+    const token = await paypalAccessToken();
+    const ppRes = await fetch(`${PAYPAL_BASE}/v2/checkout/orders/${orderID}/capture`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+    });
+    const capture = await ppRes.json();
+    const captureId = capture.purchase_units?.[0]?.payments?.captures?.[0]?.id;
+    const captureStatus = capture.status;
+
+    if (captureStatus !== 'COMPLETED') {
+      return res.status(400).json({ error: 'Payment not completed', detail: capture });
+    }
+
+    // Mark order as paid
+    await dbRun(
+      `UPDATE shop_orders SET status = 'paid', paypal_capture_id = ?, updated_at = NOW() WHERE paypal_order_id = ?`,
+      [captureId, orderID]
+    );
+    const shopOrder = await dbGet('SELECT id FROM shop_orders WHERE paypal_order_id = ?', [orderID]);
+
+    // Retrieve items and decrement inventory
+    if (shopOrder?.items) {
+      const items = typeof shopOrder.items === 'string' ? JSON.parse(shopOrder.items) : shopOrder.items;
+      for (const item of items) {
+        await dbRun(
+          `UPDATE inventory SET status = 'sold', sold_at = NOW()
+           WHERE model = ? AND storage = ? AND color = ? AND status = 'available'
+           LIMIT ?`,
+          [item.model, item.storage, item.color, item.qty]
+        );
+      }
+    }
+
+    res.json({ status: 'COMPLETED', captureId, shopOrderId: shopOrder?.id });
+  } catch (err) {
+    console.error('capture-order error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/shop/register
+app.post('/api/shop/register', async (req, res) => {
+  try {
+    const { first_name, last_name, email, password, phone } = req.body;
+    if (!email || !password || !first_name) return res.status(400).json({ error: 'Name, email and password required' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    const existing = await dbGet('SELECT id FROM shop_customers WHERE email = ?', [email.toLowerCase()]);
+    if (existing) return res.status(409).json({ error: 'An account with that email already exists' });
+    const bcrypt = require('bcryptjs');
+    const hash = await bcrypt.hash(password, 10);
+    const result = await dbRun(
+      'INSERT INTO shop_customers (first_name, last_name, email, password_hash, phone) VALUES (?,?,?,?,?)',
+      [first_name, last_name || '', email.toLowerCase(), hash, phone || '']
+    );
+    const user = { id: result.lastID || result.insertId, first_name, last_name: last_name || '', email: email.toLowerCase() };
+    const token = require('jsonwebtoken').sign({ id: user.id, email: user.email, role: 'customer' }, process.env.JWT_SECRET || 'tekhouz_secret', { expiresIn: '30d' });
+    res.json({ user, token });
+  } catch (err) {
+    console.error('shop/register error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/shop/login
+app.post('/api/shop/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const customer = await dbGet('SELECT * FROM shop_customers WHERE email = ?', [email.toLowerCase()]);
+    if (!customer) return res.status(401).json({ error: 'Invalid email or password' });
+    const bcrypt = require('bcryptjs');
+    const valid = await bcrypt.compare(password, customer.password_hash);
+    if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
+    const user = { id: customer.id, first_name: customer.first_name, last_name: customer.last_name, email: customer.email };
+    const token = require('jsonwebtoken').sign({ id: user.id, email: user.email, role: 'customer' }, process.env.JWT_SECRET || 'tekhouz_secret', { expiresIn: '30d' });
+    res.json({ user, token });
+  } catch (err) {
+    console.error('shop/login error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/shop/track?q=  — look up orders by order ID or email
+app.get('/api/shop/track', async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'Missing query' });
+    let orders;
+    if (/^\d+$/.test(q)) {
+      orders = await dbAll('SELECT * FROM shop_orders WHERE id = ?', [q]);
+    } else {
+      orders = await dbAll('SELECT * FROM shop_orders WHERE customer_email = ? ORDER BY created_at DESC', [q.toLowerCase()]);
+    }
+    res.json({ orders });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/shop/orders  — internal view of shop orders (auth required)
+app.get('/api/shop/orders', auth, async (req, res) => {
+  try {
+    const orders = await dbAll('SELECT * FROM shop_orders ORDER BY created_at DESC LIMIT 200');
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
