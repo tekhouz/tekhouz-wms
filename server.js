@@ -2691,18 +2691,24 @@ app.get('/api/shop/inventory', async (req, res) => {
       ORDER BY i.device_type, i.model, i.price
     `);
 
-    function mapCategory(deviceType) {
+    function mapCategory(deviceType, model) {
       const d = (deviceType || '').toLowerCase();
-      if (d.includes('iphone')) return 'iphone';
+      const m = (model || '').toLowerCase();
+      if (d.includes('iphone') || m.includes('iphone')) return 'iphone';
       if (d.includes('macbook') || d === 'laptop') return 'macbook';
+      if (d.includes('surface') || m.includes('surface')) return 'surface';
+      if (d.includes('ipad') || d.includes('tablet') || m.includes('ipad')) return 'ipad';
+      if (d === 'phone' || d.includes('phone')) {
+        if (m.includes('iphone')) return 'iphone';
+        if (m.includes('surface')) return 'surface';
+        return 'android';
+      }
       if (d.includes('samsung') || d.includes('android') || d.includes('pixel') || d.includes('google')) return 'android';
-      if (d.includes('surface')) return 'surface';
-      if (d.includes('ipad') || d.includes('tablet')) return 'ipad';
       return 'other';
     }
 
     const products = rows.map(r => ({
-      category: mapCategory(r.category_raw),
+      category: mapCategory(r.category_raw, r.model),
       model: r.model || '',
       color: r.color || '',
       storage: r.storage || '',
