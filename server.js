@@ -56,7 +56,9 @@ const SHOP_ALLOWED_ORIGINS = [
   'https://tekhouz.com',
   'https://tekhouse.shop',
   'https://www.tekhouse.shop',
+  'https://soothing-patience-production-c27c.up.railway.app',
   'http://localhost:3000',
+  'http://localhost:4200',
   'http://localhost:5500',
   'http://127.0.0.1:5500'
 ];
