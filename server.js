@@ -48,7 +48,11 @@ if (process.env.NODE_ENV !== 'test') app.use(morgan('combined'));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500, message: { error: 'Too many requests' } }));
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModified: false, setHeaders: (res, filePath) => {
+  if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  }
+}}));
 
 // ─── PUBLIC SHOP INVENTORY CORS (NEW) ──────────────────────────────────────
 // Only allows your shop domain(s) to call /api/shop/* routes. No auth needed
