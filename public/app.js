@@ -7,7 +7,7 @@ const S = {
   inventory: { items: [], total: 0, vendors: [], months: [], types: [] },
   dashboard: null,
   users: [],
-  po: { pos: [], total: 0, filters: { search: '', vendor: '', month: '', year: '' }, currentPo: null, poItems: [], itemSearch: '' },
+  po: { pos: [], total: 0, filters: { search: '', vendor: '', month: '', year: '', invoice_no: '' }, currentPo: null, poItems: [], itemSearch: '' },
   returns: { list: [], stats: {}, filters: { status: '', return_from: '', search: '' } },
   requisitions: { list: [], stats: {}, filters: { status: '', priority: '', part_category: '', search: '' } },
   partspo: { list: [], stats: {}, filters: { status: '', vendor: '', search: '' } },
@@ -16,7 +16,7 @@ const S = {
   catalog: null,
   oFilters: { date: '', source: '', search: '', delivery: '' },
   _oTypeTab: 'all',
-  iFilters: { month: '', year: '', vendor: '', device_type: '', lot_id: '', search: '' },
+  iFilters: { month: '', year: '', vendor: '', device_type: '', lot_id: '', search: '', invoice_no: '' },
   _invSelected: new Set(),
   _ordSelected: new Set(),
   _poItemSelected: new Set(),
@@ -1304,6 +1304,7 @@ async function loadInventory() {
     if (S.iFilters.device_type) p.set('device_type', S.iFilters.device_type);
     if (S.iFilters.lot_id) p.set('lot_id', S.iFilters.lot_id);
     if (S.iFilters.search) p.set('search', S.iFilters.search);
+    if (S.iFilters.invoice_no) p.set('invoice_no', S.iFilters.invoice_no);
     p.set('limit', 10000);
     const d = await api('GET', '/api/inventory?' + p);
     S.inventory = d;
@@ -1510,6 +1511,7 @@ async function loadInventory() {
         <div class="toolbar-left">
           <input class="search-input" type="text" placeholder="Search S/N, model…" value="${esc(S.iFilters.search)}" oninput="S.iFilters.search=this.value" onkeydown="if(event.key==='Enter')loadInventory()">
           <input type="text" placeholder="Lot ID" value="${esc(S.iFilters.lot_id)}" oninput="S.iFilters.lot_id=this.value" onkeydown="if(event.key==='Enter')loadInventory()" style="width:100px">
+          <input type="text" placeholder="Invoice / PO No" value="${esc(S.iFilters.invoice_no)}" oninput="S.iFilters.invoice_no=this.value" onkeydown="if(event.key==='Enter')loadInventory()" style="width:130px">
           <select onchange="S.iFilters.month=this.value;loadInventory()">
             <option value="">All Months</option>${monthOpts}
           </select>
@@ -1521,7 +1523,7 @@ async function loadInventory() {
           <select onchange="S.iFilters.vendor=this.value;loadInventory()">
             <option value="">All Vendors</option>${vendorOpts}
           </select>
-          <button class="btn btn-outline btn-sm" onclick="S.iFilters={month:'',year:'',vendor:'',device_type:'',lot_id:'',search:''};S._iTypeTab='all';loadInventory()">Clear</button>
+          <button class="btn btn-outline btn-sm" onclick="S.iFilters={month:'',year:'',vendor:'',device_type:'',lot_id:'',search:'',invoice_no:''};S._iTypeTab='all';loadInventory()">Clear</button>
         </div>
         <div class="toolbar-right">
           <button class="btn btn-outline btn-sm" onclick="toggleAllInvCards(true)">Expand All</button>
@@ -1605,16 +1607,29 @@ async function doExportInventory() {
     if (S.iFilters.month) p.set('month', S.iFilters.month);
     if (S.iFilters.year) p.set('year', S.iFilters.year);
     if (S.iFilters.vendor) p.set('vendor', S.iFilters.vendor);
-    if (S.iFilters.device_type) p.set('device_type', S.iFilters.device_type);
     if (S.iFilters.lot_id) p.set('lot_id', S.iFilters.lot_id);
     if (S.iFilters.search) p.set('search', S.iFilters.search);
+    if (S.iFilters.invoice_no) p.set('invoice_no', S.iFilters.invoice_no);
+    // Pass active type tab as device_type filter (tab overrides dropdown)
+    const activeType = S.iFilters.device_type || (S._iTypeTab !== 'all' ? S._iTypeTab : '');
+    if (activeType) p.set('device_type', activeType);
     const resp = await fetch('/api/inventory/export?' + p, { headers: { Authorization: 'Bearer ' + S.token } });
     if (!resp.ok) throw new Error('Export failed');
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Inventory_${new Date().toISOString().slice(0,10)}.xlsx`;
+    // Build a descriptive filename from active filters
+    const nameParts = ['Inventory'];
+    if (S.iFilters.search) nameParts.push(S.iFilters.search.replace(/\s+/g,'_'));
+    else if (activeType) nameParts.push(activeType.replace(/\s+/g,'_'));
+    if (S.iFilters.vendor) nameParts.push(S.iFilters.vendor.replace(/\s+/g,'_'));
+    if (S.iFilters.lot_id) nameParts.push(S.iFilters.lot_id);
+    if (S.iFilters.invoice_no) nameParts.push(S.iFilters.invoice_no.replace(/\s+/g,'_'));
+    if (S.iFilters.month) nameParts.push(S.iFilters.month);
+    if (S.iFilters.year) nameParts.push(S.iFilters.year);
+    nameParts.push(new Date().toISOString().slice(0,10));
+    a.download = nameParts.join('_').replace(/[^a-zA-Z0-9_\-\.]/g,'') + '.xlsx';
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     showToast('✓ Inventory exported');
@@ -2528,6 +2543,7 @@ async function renderPOList() {
     if (S.po.filters.vendor) p.set('vendor', S.po.filters.vendor);
     if (S.po.filters.month) p.set('month', S.po.filters.month);
     if (S.po.filters.year) p.set('year', S.po.filters.year);
+    if (S.po.filters.invoice_no) p.set('invoice_no', S.po.filters.invoice_no);
     const d = await api('GET', '/api/purchase-orders?' + p);
     S.po.pos = d.pos; S.po.total = d.total;
 
@@ -2568,7 +2584,8 @@ async function renderPOList() {
       <div class="screen-header"><h2>Purchase Orders</h2><p>${d.total} total purchase orders</p></div>
       <div class="toolbar">
         <div class="toolbar-left">
-          <input class="search-input" type="text" placeholder="Search lot ID, vendor, invoice…" value="${esc(S.po.filters.search)}" oninput="S.po.filters.search=this.value" onkeydown="if(event.key==='Enter')renderPOList()">
+          <input class="search-input" type="text" placeholder="Search lot ID, vendor…" value="${esc(S.po.filters.search)}" oninput="S.po.filters.search=this.value" onkeydown="if(event.key==='Enter')renderPOList()">
+          <input type="text" placeholder="Invoice / PO No" value="${esc(S.po.filters.invoice_no)}" oninput="S.po.filters.invoice_no=this.value" onkeydown="if(event.key==='Enter')renderPOList()" style="width:130px">
           <input type="text" placeholder="Filter vendor" value="${esc(S.po.filters.vendor)}" oninput="S.po.filters.vendor=this.value" onkeydown="if(event.key==='Enter')renderPOList()" style="width:140px">
           <select onchange="S.po.filters.month=this.value;renderPOList()">
             <option value="">All Months</option>${monthOpts}
@@ -2577,7 +2594,7 @@ async function renderPOList() {
             <option value="">All Years</option>
             ${['2026','2025','2024'].map(y=>`<option value="${y}" ${S.po.filters.year===y?'selected':''}>${y}</option>`).join('')}
           </select>
-          <button class="btn btn-outline btn-sm" onclick="S.po.filters={search:'',vendor:'',month:'',year:''};renderPOList()">Clear</button>
+          <button class="btn btn-outline btn-sm" onclick="S.po.filters={search:'',vendor:'',month:'',year:'',invoice_no:''};renderPOList()">Clear</button>
         </div>
         <div class="toolbar-right">
           <button class="btn btn-primary" onclick="showAddPO()">

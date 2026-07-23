@@ -1393,7 +1393,7 @@ app.post('/api/admin/backfill-inventory-deduction', auth, adminOnly, async (req,
 // ─── Inventory ────────────────────────────────────────────────────────────────
 app.get('/api/inventory', auth, async (req, res) => {
   try {
-    const { month, year, vendor, device_type, lot_id, search, page = 1, limit = 100 } = req.query;
+    const { month, year, vendor, device_type, lot_id, search, invoice_no, page = 1, limit = 100 } = req.query;
     let q = `SELECT i.*,
              t.id test_id, t.tested_by, t.testing_owner, t.test_date,
              t.final_grade tested_grade, t.overall_grade,
@@ -1410,6 +1410,7 @@ app.get('/api/inventory', auth, async (req, res) => {
     if (vendor) { q += ' AND i.vendor = ?'; p.push(vendor); }
     if (device_type) { q += ' AND i.device_type = ?'; p.push(device_type); }
     if (lot_id) { q += ' AND i.lot_id LIKE ?'; p.push(`%${lot_id}%`); }
+    if (invoice_no) { q += ' AND i.invoice_no LIKE ?'; p.push(`%${invoice_no}%`); }
     if (search) {
       q += ' AND (i.serial_number LIKE ? OR i.imei LIKE ? OR i.description LIKE ? OR i.sku LIKE ? OR i.model LIKE ?)';
       const s = `%${search}%`; p.push(s,s,s,s,s);
@@ -1439,7 +1440,7 @@ app.get('/api/inventory', auth, async (req, res) => {
 
 app.get('/api/inventory/export', auth, async (req, res) => {
   try {
-    const { month, year, vendor, device_type, lot_id, search } = req.query;
+    const { month, year, vendor, device_type, lot_id, search, invoice_no } = req.query;
     let q = `SELECT i.*,
              t.tested_by, t.testing_owner, t.test_date,
              t.final_grade tested_grade, t.overall_grade,
@@ -1456,6 +1457,7 @@ app.get('/api/inventory/export', auth, async (req, res) => {
     if (vendor) { q += ' AND i.vendor = ?'; p.push(vendor); }
     if (device_type) { q += ' AND i.device_type = ?'; p.push(device_type); }
     if (lot_id) { q += ' AND i.lot_id LIKE ?'; p.push(`%${lot_id}%`); }
+    if (invoice_no) { q += ' AND i.invoice_no LIKE ?'; p.push(`%${invoice_no}%`); }
     if (search) {
       q += ' AND (i.serial_number LIKE ? OR i.imei LIKE ? OR i.description LIKE ? OR i.sku LIKE ? OR i.model LIKE ?)';
       const s = `%${search}%`; p.push(s,s,s,s,s);
@@ -1770,7 +1772,7 @@ app.put('/api/settings/catalog', auth, adminOnly, async (req, res) => {
 // ─── Purchase Orders ──────────────────────────────────────────────────────────
 app.get('/api/purchase-orders', auth, async (req, res) => {
   try {
-    const { search, vendor, month, year, page = 1, limit = 100 } = req.query;
+    const { search, vendor, month, year, invoice_no, page = 1, limit = 100 } = req.query;
     let q = `SELECT *,
              (SELECT COUNT(*) FROM po_items WHERE po_id = purchase_orders.id) item_count,
              (SELECT COALESCE(SUM(qty),0) FROM po_items WHERE po_id = purchase_orders.id) total_qty,
@@ -1778,6 +1780,7 @@ app.get('/api/purchase-orders', auth, async (req, res) => {
              FROM purchase_orders WHERE 1=1`;
     const p = [];
     if (search) { q += ' AND (lot_id LIKE ? OR invoice_no LIKE ? OR vendor_name LIKE ? OR notes LIKE ?)'; const s=`%${search}%`; p.push(s,s,s,s); }
+    if (invoice_no) { q += ' AND invoice_no LIKE ?'; p.push(`%${invoice_no}%`); }
     if (vendor) { q += ' AND vendor_name LIKE ?'; p.push(`%${vendor}%`); }
     if (month) { q += ' AND purchase_month = ?'; p.push(month); }
     if (year) { q += ' AND purchase_year = ?'; p.push(parseInt(year)); }
