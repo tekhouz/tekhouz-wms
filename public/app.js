@@ -23,6 +23,12 @@ const S = {
 };
 
 // ─── API ───────────────────────────────────────────────────────────────────
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+const debouncedLoadInventory = debounce(() => loadInventory(), 400);
+const debouncedRenderPOList = debounce(() => renderPOList(), 400);
+
 async function api(method, path, body, isFile) {
   const opts = { method, headers: {} };
   if (S.token) opts.headers['Authorization'] = 'Bearer ' + S.token;
@@ -1509,9 +1515,9 @@ async function loadInventory() {
       <div class="inv-type-tabs">${typeTabs}</div>
       <div class="toolbar" style="margin-top:0">
         <div class="toolbar-left">
-          <input class="search-input" type="text" placeholder="Search S/N, model…" value="${esc(S.iFilters.search)}" oninput="S.iFilters.search=this.value" onkeydown="if(event.key==='Enter')loadInventory()">
-          <input type="text" placeholder="Lot ID" value="${esc(S.iFilters.lot_id)}" oninput="S.iFilters.lot_id=this.value" onkeydown="if(event.key==='Enter')loadInventory()" style="width:100px">
-          <input type="text" placeholder="Invoice / PO No" value="${esc(S.iFilters.invoice_no)}" oninput="S.iFilters.invoice_no=this.value" onkeydown="if(event.key==='Enter')loadInventory()" style="width:130px">
+          <input class="search-input" type="text" placeholder="Search S/N, model…" value="${esc(S.iFilters.search)}" oninput="S.iFilters.search=this.value;debouncedLoadInventory()">
+          <input type="text" placeholder="Lot ID" value="${esc(S.iFilters.lot_id)}" oninput="S.iFilters.lot_id=this.value;debouncedLoadInventory()" style="width:100px">
+          <input type="text" placeholder="Invoice / PO No" value="${esc(S.iFilters.invoice_no)}" oninput="S.iFilters.invoice_no=this.value;debouncedLoadInventory()" style="width:130px">
           <select onchange="S.iFilters.month=this.value;loadInventory()">
             <option value="">All Months</option>${monthOpts}
           </select>
@@ -2584,9 +2590,9 @@ async function renderPOList() {
       <div class="screen-header"><h2>Purchase Orders</h2><p>${d.total} total purchase orders</p></div>
       <div class="toolbar">
         <div class="toolbar-left">
-          <input class="search-input" type="text" placeholder="Search lot ID, vendor…" value="${esc(S.po.filters.search)}" oninput="S.po.filters.search=this.value" onkeydown="if(event.key==='Enter')renderPOList()">
-          <input type="text" placeholder="Invoice / PO No" value="${esc(S.po.filters.invoice_no)}" oninput="S.po.filters.invoice_no=this.value" onkeydown="if(event.key==='Enter')renderPOList()" style="width:130px">
-          <input type="text" placeholder="Filter vendor" value="${esc(S.po.filters.vendor)}" oninput="S.po.filters.vendor=this.value" onkeydown="if(event.key==='Enter')renderPOList()" style="width:140px">
+          <input class="search-input" type="text" placeholder="Search lot ID, vendor…" value="${esc(S.po.filters.search)}" oninput="S.po.filters.search=this.value;debouncedRenderPOList()">
+          <input type="text" placeholder="Invoice / PO No" value="${esc(S.po.filters.invoice_no)}" oninput="S.po.filters.invoice_no=this.value;debouncedRenderPOList()" style="width:130px">
+          <input type="text" placeholder="Filter vendor" value="${esc(S.po.filters.vendor)}" oninput="S.po.filters.vendor=this.value;debouncedRenderPOList()" style="width:140px">
           <select onchange="S.po.filters.month=this.value;renderPOList()">
             <option value="">All Months</option>${monthOpts}
           </select>
