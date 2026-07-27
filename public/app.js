@@ -3304,6 +3304,8 @@ async function renderSettings() {
     }
     S.catalog = catalog;
     renderSettingsUI(catalog);
+    loadProductImages();
+    loadConditionPhotos();
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }
@@ -3411,6 +3413,50 @@ function renderSettingsUI(catalog) {
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        Shop Product Images
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin:4px 0 14px">Override or add images for any product model shown on the shop. The key must match the model name (case-insensitive). Custom images take priority over built-in ones.</p>
+      <div id="product-images-list" style="margin-bottom:14px"><div class="loader"></div></div>
+      <div style="display:grid;grid-template-columns:1fr 2fr auto;gap:8px;align-items:center">
+        <input type="text" id="pi-key" placeholder="Model key e.g. iphone 14" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <input type="url" id="pi-url" placeholder="Image URL (https://...)" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="addProductImage()">Add / Update</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+        Condition Photos
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin:4px 0 14px">Upload reference images for each grade so clients can see exactly what Grade A/B/C/D looks like for a given device. Shown on the shop when a customer views a product.</p>
+      <div id="condition-photos-list" style="margin-bottom:16px"><div class="loader"></div></div>
+      <div style="display:grid;grid-template-columns:120px 60px 1fr 1fr auto;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="cp-category" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+          <option value="">Category…</option>
+          <option>iPhone</option>
+          <option>MacBook</option>
+          <option>iPad</option>
+          <option>Android</option>
+          <option>Surface Laptop</option>
+          <option>Other</option>
+        </select>
+        <select id="cp-grade" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+          <option value="">Grade…</option>
+          <option>A</option>
+          <option>B</option>
+          <option>C</option>
+          <option>D</option>
+        </select>
+        <input type="url" id="cp-url" placeholder="Image URL (https://...)" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <input type="text" id="cp-caption" placeholder="Caption (optional, e.g. 'Screen scratch')" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="addConditionPhoto()">Add</button>
+      </div>
+    </div>
+
     <div class="screen-header" style="margin-top:8px"><h2 style="font-size:16px">Device Models by Brand</h2><p style="font-size:12px">Built-in models (●) cannot be removed. Add custom models per brand.</p></div>
     ${modelsHtml}`;
 }
@@ -3437,6 +3483,112 @@ function removeCatalogItem(field, val) {
   if (!S.catalog?.[field]) return;
   S.catalog[field] = S.catalog[field].filter(v => v !== val);
   saveCatalog().then(() => renderSettingsUI(S.catalog));
+}
+
+async function loadProductImages() {
+  const el = document.getElementById('product-images-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/product-images');
+    if (!rows.length) { el.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">No custom images yet.</p>'; return; }
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="border-bottom:2px solid var(--border)">
+        <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--muted)">Model Key</th>
+        <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--muted)">Preview</th>
+        <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--muted)">URL</th>
+        <th style="padding:6px 8px;"></th>
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-weight:600;white-space:nowrap">${esc(r.model_key)}</td>
+        <td style="padding:8px"><img src="${esc(r.image_url)}" style="height:44px;width:60px;object-fit:contain;border-radius:4px;background:var(--bg);border:1px solid var(--border)" onerror="this.style.opacity='.3'"></td>
+        <td style="padding:8px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${esc(r.image_url)}</td>
+        <td style="padding:8px;text-align:right"><button class="btn btn-outline btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteProductImage('${esc(r.model_key)}')">Remove</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e) { el.innerHTML = `<p style="color:var(--red);font-size:13px">${e.message}</p>`; }
+}
+
+async function addProductImage() {
+  const key = document.getElementById('pi-key')?.value?.trim().toLowerCase();
+  const url = document.getElementById('pi-url')?.value?.trim();
+  if (!key || !url) { showToast('Model key and URL are required', 'error'); return; }
+  try {
+    await api('POST', '/api/product-images', { model_key: key, image_url: url });
+    document.getElementById('pi-key').value = '';
+    document.getElementById('pi-url').value = '';
+    showToast('✓ Image saved');
+    loadProductImages();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteProductImage(key) {
+  if (!confirm(`Remove image for "${key}"?`)) return;
+  try {
+    await api('DELETE', `/api/product-images/${encodeURIComponent(key)}`);
+    showToast('✓ Removed');
+    loadProductImages();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ─── Condition Photos ──────────────────────────────────────────────────────────
+const GRADE_COLORS = { A: '#22c55e', B: '#3b82f6', C: '#f59e0b', D: '#ef4444' };
+
+async function loadConditionPhotos() {
+  const el = document.getElementById('condition-photos-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/condition-photos');
+    if (!rows.length) {
+      el.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">No condition photos yet. Add some below.</p>';
+      return;
+    }
+    // Group by category + grade
+    const groups = {};
+    rows.forEach(r => {
+      const k = `${r.category} — Grade ${r.grade}`;
+      if (!groups[k]) groups[k] = { grade: r.grade, photos: [] };
+      groups[k].photos.push(r);
+    });
+    el.innerHTML = Object.entries(groups).map(([label, { grade, photos }]) => `
+      <div style="margin-bottom:18px">
+        <div style="font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.5px;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+          <span style="background:${GRADE_COLORS[grade]||'#888'};color:#fff;padding:2px 8px;border-radius:20px;font-size:11px">Grade ${esc(grade)}</span>
+          ${esc(label)}
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px">
+          ${photos.map(p => `
+            <div style="position:relative;width:110px;text-align:center">
+              <img src="${esc(p.image_url)}" style="width:110px;height:80px;object-fit:cover;border-radius:8px;border:1.5px solid var(--border);background:var(--bg)" onerror="this.style.opacity='.3'">
+              ${p.caption ? `<div style="font-size:11px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.caption)}</div>` : ''}
+              <button onclick="deleteConditionPhoto(${p.id})" style="position:absolute;top:4px;right:4px;background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:20px;height:20px;cursor:pointer;font-size:12px;line-height:1;padding:0" title="Remove">×</button>
+            </div>`).join('')}
+        </div>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = `<p style="color:var(--red);font-size:13px">${e.message}</p>`; }
+}
+
+async function addConditionPhoto() {
+  const category = document.getElementById('cp-category')?.value;
+  const grade = document.getElementById('cp-grade')?.value;
+  const url = document.getElementById('cp-url')?.value?.trim();
+  const caption = document.getElementById('cp-caption')?.value?.trim();
+  if (!category || !grade || !url) { showToast('Category, grade and URL are required', 'error'); return; }
+  try {
+    await api('POST', '/api/condition-photos', { category, grade, image_url: url, caption });
+    document.getElementById('cp-url').value = '';
+    document.getElementById('cp-caption').value = '';
+    showToast('✓ Photo added');
+    loadConditionPhotos();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteConditionPhoto(id) {
+  if (!confirm('Remove this condition photo?')) return;
+  try {
+    await api('DELETE', `/api/condition-photos/${id}`);
+    showToast('✓ Removed');
+    loadConditionPhotos();
+  } catch(e) { showToast(e.message, 'error'); }
 }
 
 function addCustomModel(brand) {

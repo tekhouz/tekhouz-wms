@@ -76,6 +76,7 @@ app.use('/api/shop', (req, res, next) => {
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -713,6 +714,19 @@ async function initDB() {
       quantity INT DEFAULT 1,
       notes TEXT,
       FOREIGN KEY (service_order_id) REFERENCES service_orders(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS condition_photos (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      category VARCHAR(50) NOT NULL,
+      grade CHAR(1) NOT NULL,
+      model_key VARCHAR(100) DEFAULT NULL,
+      image_url TEXT NOT NULL,
+      caption VARCHAR(255) DEFAULT NULL,
+      sort_order INT DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -2709,6 +2723,80 @@ app.delete('/api/returns/media/:mediaId', auth, async (req, res) => {
 
 // ─── PUBLIC SHOP INVENTORY (NEW — for shop.tekhouz.com) ────────────────────────
 // No auth. CORS-restricted (see middleware near top of file). Strips
+// GET /api/shop/images — public, returns all custom product images
+app.get('/api/shop/images', async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT model_key, image_url FROM product_images ORDER BY model_key');
+    const map = {};
+    rows.forEach(r => { map[r.model_key] = r.image_url; });
+    res.json(map);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/product-images — admin
+app.get('/api/product-images', auth, async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT model_key, image_url, updated_at FROM product_images ORDER BY model_key');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/product-images — admin upsert
+app.post('/api/product-images', auth, async (req, res) => {
+  try {
+    const { model_key, image_url } = req.body;
+    if (!model_key || !image_url) return res.status(400).json({ error: 'model_key and image_url required' });
+    await dbRun(
+      'INSERT INTO product_images (model_key, image_url) VALUES (?,?) ON DUPLICATE KEY UPDATE image_url=VALUES(image_url)',
+      [model_key.toLowerCase().trim(), image_url.trim()]
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/product-images/:key — admin
+app.delete('/api/product-images/:key', auth, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM product_images WHERE model_key = ?', [req.params.key]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Condition Photos ──────────────────────────────────────────────────────────
+// Public endpoint — shop fetches this to show grade galleries
+app.get('/api/shop/condition-photos', async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT id, category, grade, model_key, image_url, caption, sort_order FROM condition_photos ORDER BY category, grade, sort_order, id');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/condition-photos', auth, async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT id, category, grade, model_key, image_url, caption, sort_order FROM condition_photos ORDER BY category, grade, sort_order, id');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/condition-photos', auth, async (req, res) => {
+  try {
+    const { category, grade, model_key, image_url, caption, sort_order } = req.body;
+    if (!category || !grade || !image_url) return res.status(400).json({ error: 'category, grade, image_url required' });
+    const result = await dbRun(
+      'INSERT INTO condition_photos (category, grade, model_key, image_url, caption, sort_order) VALUES (?,?,?,?,?,?)',
+      [category.trim(), grade.trim().toUpperCase(), model_key?.trim() || null, image_url.trim(), caption?.trim() || null, sort_order || 0]
+    );
+    res.json({ ok: true, id: result.insertId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/condition-photos/:id', auth, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM condition_photos WHERE id = ?', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // vendor/cost/serial/IMEI data — only model/color/storage/RAM/grade/qty/price.
 app.get('/api/shop/inventory', async (req, res) => {
   try {
@@ -2855,17 +2943,60 @@ app.post('/api/shop/capture-order', async (req, res) => {
     );
     const shopOrder = await dbGet('SELECT id FROM shop_orders WHERE paypal_order_id = ?', [orderID]);
 
-    // Retrieve items and decrement inventory
-    if (shopOrder?.items) {
-      const items = typeof shopOrder.items === 'string' ? JSON.parse(shopOrder.items) : shopOrder.items;
-      for (const item of items) {
-        await dbRun(
-          `UPDATE inventory SET status = 'sold', sold_at = NOW()
-           WHERE model = ? AND storage = ? AND color = ? AND status = 'available'
-           LIMIT ?`,
-          [item.model, item.storage, item.color, item.qty]
-        );
-      }
+    // Retrieve full order for email + decrement inventory
+    const fullOrder = await dbGet('SELECT * FROM shop_orders WHERE paypal_order_id = ?', [orderID]);
+    const orderItems = fullOrder?.items ? (typeof fullOrder.items === 'string' ? JSON.parse(fullOrder.items) : fullOrder.items) : [];
+
+    for (const item of orderItems) {
+      await dbRun(
+        `UPDATE inventory SET status = 'sold', sold_at = NOW()
+         WHERE model = ? AND storage = ? AND color = ? AND status = 'available'
+         LIMIT ?`,
+        [item.model, item.storage, item.color, item.qty]
+      );
+    }
+
+    // Send confirmation email via Resend
+    if (process.env.RESEND_API_KEY && fullOrder?.customer_email) {
+      const itemsHtml = orderItems.map(i =>
+        `<tr>
+          <td style="padding:8px 0;border-bottom:1px solid #f0f0f0;">${i.model} ${i.storage} ${i.color} — Grade ${i.grade}</td>
+          <td style="padding:8px 0;border-bottom:1px solid #f0f0f0;text-align:right;font-weight:600;">$${(i.price * i.qty).toLocaleString()}</td>
+        </tr>`
+      ).join('');
+
+      const emailHtml = `<!DOCTYPE html><html><body style="font-family:Inter,Arial,sans-serif;background:#f5f7fa;margin:0;padding:20px;">
+<div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+  <div style="background:#0f4c81;padding:28px 32px;">
+    <div style="color:#fff;font-size:22px;font-weight:700;">Tekhouz Solutions</div>
+    <div style="color:rgba(255,255,255,.65);font-size:13px;margin-top:2px;">Order Confirmation</div>
+  </div>
+  <div style="padding:28px 32px;">
+    <p style="font-size:16px;margin:0 0 8px;">Hi ${fullOrder.customer_name?.split(' ')[0] || 'there'},</p>
+    <p style="color:#555;margin:0 0 24px;font-size:14px;">Your order has been confirmed and payment received. We'll ship within 1–2 business days.</p>
+    <div style="background:#f8f9fb;border-radius:8px;padding:16px 20px;margin-bottom:20px;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:#888;margin-bottom:12px;">Order #${fullOrder.id}</div>
+      <table style="width:100%;border-collapse:collapse;">${itemsHtml}
+        <tr><td style="padding-top:12px;font-weight:700;font-size:15px;">Total</td><td style="padding-top:12px;text-align:right;font-weight:700;font-size:15px;color:#0f4c81;">$${Number(fullOrder.total).toLocaleString()}</td></tr>
+      </table>
+    </div>
+    <p style="font-size:13px;color:#666;margin:0 0 4px;"><strong>Ship to:</strong> ${fullOrder.customer_name}</p>
+    <p style="font-size:13px;color:#666;margin:0 0 20px;">${fullOrder.shipping_address || 'Address on file'}</p>
+    <p style="font-size:13px;color:#888;margin:0;">Questions? Reply to this email or contact <a href="mailto:support@tekhouz.com" style="color:#0f4c81;">support@tekhouz.com</a></p>
+  </div>
+  <div style="background:#f5f7fa;padding:16px 32px;text-align:center;font-size:12px;color:#aaa;">© ${new Date().getFullYear()} Tekhouz Solutions · Wholesale Refurbished Tech</div>
+</div></body></html>`;
+
+      fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: 'Tekhouz Solutions <orders@tekhouz.com>',
+          to: [fullOrder.customer_email],
+          subject: `Order Confirmed — #${fullOrder.id}`,
+          html: emailHtml
+        })
+      }).then(r => r.json()).then(r => console.log('Resend:', r.id || JSON.stringify(r))).catch(e => console.error('Resend error:', e.message));
     }
 
     res.json({ status: 'COMPLETED', captureId, shopOrderId: shopOrder?.id });
