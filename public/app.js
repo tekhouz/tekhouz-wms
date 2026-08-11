@@ -2469,27 +2469,35 @@ async function renderPricing() {
       api('GET', '/api/retail-prices')
     ]);
     const items = Array.isArray(inv) ? inv : (inv.items || []);
-    // Build unique model+grade combos
+    // Build unique model+storage+ram+grade combos
     const seen = {};
     items.forEach(it => {
       const model = (it.model||'').trim();
+      const storage = (it.storage||'').trim();
+      const ram = (it.ram||'').trim();
       const grade = (it.grade || it.condition_grade || 'B').toString().match(/[A-Da-d]/)?.[0]?.toUpperCase() || 'B';
-      const key = `${model.toLowerCase()}|${grade}`;
-      if (!seen[key]) seen[key] = { model, grade, costs: [], override: it.price_override };
+      const key = `${model.toLowerCase()}|${storage.toLowerCase()}|${ram.toLowerCase()}|${grade}`;
+      if (!seen[key]) seen[key] = { model, storage, ram, grade, costs: [] };
       seen[key].costs.push(Number(it.price)||0);
     });
     const rpMap = {};
-    retailPrices.forEach(r => { rpMap[`${r.model_key}|${r.grade}`] = { id: r.id, price: parseFloat(r.retail_price) }; });
+    retailPrices.forEach(r => {
+      rpMap[`${r.model_key}|${(r.storage||'').toLowerCase()}|${(r.ram||'').toLowerCase()}|${r.grade}`] = { id: r.id, price: parseFloat(r.retail_price) };
+    });
 
-    const combos = Object.values(seen).sort((a,b) => a.model.localeCompare(b.model) || a.grade.localeCompare(b.grade));
+    const combos = Object.values(seen).sort((a,b) => a.model.localeCompare(b.model) || a.storage.localeCompare(b.storage) || a.ram.localeCompare(b.ram) || a.grade.localeCompare(b.grade));
     const rows = combos.map(c => {
       const avgCost = Math.round(c.costs.reduce((s,x)=>s+x,0)/c.costs.length);
       const mk = c.model.toLowerCase();
-      const rp = rpMap[`${mk}|${c.grade}`];
+      const sk = c.storage.toLowerCase();
+      const rk = c.ram.toLowerCase();
+      const rp = rpMap[`${mk}|${sk}|${rk}|${c.grade}`];
       const autoPrice = Math.round(avgCost * 1.20);
-      const effectivePrice = rp ? rp.price : autoPrice;
+      const inputId = `rpo-${mk}-${sk}-${rk}-${c.grade}`.replace(/[^a-z0-9-]/g,'_');
+      const specs = [c.storage, c.ram].filter(Boolean).join(' · ');
       return `<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:9px 10px;font-weight:600">${esc(c.model)}</td>
+        <td style="padding:9px 10px;color:var(--muted);font-size:12px">${specs||'—'}</td>
         <td style="padding:9px 10px"><span style="background:${GRADE_COLORS[c.grade]||'#888'};color:#fff;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700">Grade ${c.grade}</span></td>
         <td style="padding:9px 10px;color:var(--muted)">$${avgCost}</td>
         <td style="padding:9px 10px">$${autoPrice} <span style="font-size:11px;color:var(--muted)">(cost ×1.2)</span></td>
@@ -2498,23 +2506,24 @@ async function renderPricing() {
         </td>
         <td style="padding:9px 10px">
           <div style="display:flex;gap:6px;align-items:center">
-            <input type="number" id="rpo-${mk}-${c.grade}" value="${rp?rp.price:''}" placeholder="${autoPrice}" min="0" step="0.01"
+            <input type="number" id="${inputId}" value="${rp?rp.price:''}" placeholder="${autoPrice}" min="0" step="0.01"
               style="width:90px;padding:5px 8px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
-            <button class="btn btn-primary btn-sm" onclick="savePriceOverride('${mk}','${c.grade}',${rp?rp.id:0})">Save</button>
+            <button class="btn btn-primary btn-sm" onclick="savePriceOverride('${mk}','${c.grade}',${rp?rp.id:0},'${c.storage}','${c.ram}','${inputId}')">Save</button>
             ${rp ? `<button class="btn btn-outline btn-sm" style="color:var(--red);border-color:var(--red)" onclick="clearPriceOverride(${rp.id},'${mk}','${c.grade}')">Clear</button>` : ''}
           </div>
         </td>
       </tr>`;
     });
-    el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices shown on the shop per model and grade</p></div>
+    el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices shown on the shop per model, storage, RAM, and grade</p></div>
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-        <p style="color:var(--muted);font-size:13px;margin:0">Set the B2C price per model + grade. Leave blank to use automatic pricing (cost × 1.2).</p>
+        <p style="color:var(--muted);font-size:13px;margin:0">Set the B2C price per model + config + grade. Leave blank to use automatic pricing (cost × 1.2).</p>
         <button class="btn btn-primary" onclick="showAddPriceModal()">+ Add Price</button>
       </div>
       <div class="table-wrap">
         <table style="width:100%;border-collapse:collapse">
           <thead><tr style="border-bottom:2px solid var(--border);background:var(--bg)">
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Model</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Storage · RAM</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Grade</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Avg Cost</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Auto Price</th>
@@ -2573,11 +2582,12 @@ async function doAddPrice() {
   } catch(e) { showToast(e.message, 'error'); }
 }
 
-async function savePriceOverride(modelKey, grade, existingId) {
-  const price = parseFloat(document.getElementById(`rpo-${modelKey}-${grade}`)?.value);
+async function savePriceOverride(modelKey, grade, existingId, storage='', ram='', inputId='') {
+  const id = inputId || `rpo-${modelKey}-${grade}`;
+  const price = parseFloat(document.getElementById(id)?.value);
   if (isNaN(price) || price <= 0) { showToast('Enter a valid price', 'error'); return; }
   try {
-    await api('POST', '/api/retail-prices', { model_key: modelKey, grade, retail_price: price });
+    await api('POST', '/api/retail-prices', { model_key: modelKey, grade, storage, ram, retail_price: price });
     showToast('✓ Price saved');
     renderPricing();
   } catch(e) { showToast(e.message, 'error'); }

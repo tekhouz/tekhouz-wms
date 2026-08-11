@@ -739,9 +739,11 @@ async function initDB() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       model_key VARCHAR(200) NOT NULL,
       grade CHAR(1) NOT NULL,
+      storage VARCHAR(100) DEFAULT '',
+      ram VARCHAR(100) DEFAULT '',
       retail_price DECIMAL(10,2) NOT NULL,
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_model_grade (model_key, grade)
+      UNIQUE KEY uniq_model_grade (model_key, grade, storage, ram)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -785,6 +787,17 @@ async function initDB() {
     'price_override DECIMAL(10,2) DEFAULT NULL']) {
     try { await pool.query(`ALTER TABLE inventory ADD COLUMN ${col}`); } catch(e) {}
   }
+  // Migrate retail_prices to include storage/ram differentiators
+  try {
+    const rpCols = await dbAll('SHOW COLUMNS FROM retail_prices');
+    const rpColNames = rpCols.map(c => c.Field);
+    if (!rpColNames.includes('storage')) {
+      await pool.query(`ALTER TABLE retail_prices ADD COLUMN storage VARCHAR(100) NOT NULL DEFAULT '' AFTER grade`);
+      await pool.query(`ALTER TABLE retail_prices ADD COLUMN ram VARCHAR(100) NOT NULL DEFAULT '' AFTER storage`);
+      await pool.query(`ALTER TABLE retail_prices DROP INDEX uniq_model_grade`).catch(()=>{});
+      await pool.query(`ALTER TABLE retail_prices ADD UNIQUE KEY uniq_model_grade (model_key, grade, storage, ram)`);
+    }
+  } catch(e) { console.warn('retail_prices migration:', e.message); }
   for (const col of ['screen_size VARCHAR(50)', 'year INT', 'model_variant VARCHAR(50)',
     'grade VARCHAR(50)', 'condition_grade VARCHAR(50)', 'lock_status VARCHAR(100)',
     'carrier VARCHAR(100)', 'missing_components VARCHAR(255)', 'damages VARCHAR(255)',
@@ -2819,27 +2832,33 @@ app.delete('/api/product-images/:id', auth, async (req, res) => {
 // ─── Retail Prices ────────────────────────────────────────────────────────────
 app.get('/api/shop/retail-prices', async (req, res) => {
   try {
-    const rows = await dbAll('SELECT model_key, grade, retail_price FROM retail_prices');
+    const rows = await dbAll('SELECT model_key, grade, storage, ram, retail_price FROM retail_prices');
     const map = {};
-    rows.forEach(r => { map[`${r.model_key.toLowerCase()}|${r.grade}`] = parseFloat(r.retail_price); });
+    rows.forEach(r => {
+      const key = `${r.model_key.toLowerCase()}|${r.grade}|${(r.storage||'').toLowerCase()}|${(r.ram||'').toLowerCase()}`;
+      map[key] = parseFloat(r.retail_price);
+      // Also store a fallback key without storage/ram for backward compat
+      const fallbackKey = `${r.model_key.toLowerCase()}|${r.grade}`;
+      if (!map[fallbackKey]) map[fallbackKey] = parseFloat(r.retail_price);
+    });
     res.json(map);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/retail-prices', auth, async (req, res) => {
   try {
-    const rows = await dbAll('SELECT id, model_key, grade, retail_price, updated_at FROM retail_prices ORDER BY model_key, grade');
+    const rows = await dbAll('SELECT id, model_key, grade, storage, ram, retail_price, updated_at FROM retail_prices ORDER BY model_key, grade, storage, ram');
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/retail-prices', auth, async (req, res) => {
   try {
-    const { model_key, grade, retail_price } = req.body;
+    const { model_key, grade, storage, ram, retail_price } = req.body;
     if (!model_key || !grade || retail_price == null) return res.status(400).json({ error: 'model_key, grade, retail_price required' });
     await dbRun(
-      'INSERT INTO retail_prices (model_key, grade, retail_price) VALUES (?,?,?) ON DUPLICATE KEY UPDATE retail_price=VALUES(retail_price)',
-      [model_key.toLowerCase().trim(), grade.toUpperCase().trim(), parseFloat(retail_price)]
+      'INSERT INTO retail_prices (model_key, grade, storage, ram, retail_price) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE retail_price=VALUES(retail_price)',
+      [model_key.toLowerCase().trim(), grade.toUpperCase().trim(), (storage||'').trim(), (ram||'').trim(), parseFloat(retail_price)]
     );
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
