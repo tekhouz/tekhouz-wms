@@ -2507,7 +2507,10 @@ async function renderPricing() {
       </tr>`;
     });
     el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices shown on the shop per model and grade</p></div>
-      <p style="color:var(--muted);font-size:13px;margin:-8px 0 16px">Set the B2C price shown on the shop for each model + grade. Leave blank to use automatic pricing (cost × 1.2).</p>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <p style="color:var(--muted);font-size:13px;margin:0">Set the B2C price per model + grade. Leave blank to use automatic pricing (cost × 1.2).</p>
+        <button class="btn btn-primary" onclick="showAddPriceModal()">+ Add Price</button>
+      </div>
       <div class="table-wrap">
         <table style="width:100%;border-collapse:collapse">
           <thead><tr style="border-bottom:2px solid var(--border);background:var(--bg)">
@@ -2522,6 +2525,52 @@ async function renderPricing() {
         </table>
       </div>`;
   } catch(ex) { el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices</p></div><div class="alert alert-error">${ex.message}</div>`; }
+}
+
+function showAddPriceModal() {
+  openModal(`
+    <div class="modal-header">
+      <h3>Add Price</h3>
+      <button class="modal-close" onclick="closeModal()"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid form-grid-2">
+        <div class="form-group" style="grid-column:1/-1">
+          <label>Model Key</label>
+          <input type="text" id="ap-model" placeholder="e.g. iphone 13, galaxy s23 fe" style="text-transform:lowercase">
+        </div>
+        <div class="form-group">
+          <label>Grade</label>
+          <select id="ap-grade">
+            <option value="A">A — Excellent</option>
+            <option value="B" selected>B — Very Good</option>
+            <option value="C">C — Good</option>
+            <option value="D">D — Repair</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>B2C Price ($)</label>
+          <input type="number" id="ap-price" placeholder="0.00" min="0" step="0.01">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doAddPrice()">Save Price</button>
+    </div>`);
+}
+
+async function doAddPrice() {
+  const model_key = document.getElementById('ap-model')?.value?.trim().toLowerCase();
+  const grade = document.getElementById('ap-grade')?.value;
+  const price = parseFloat(document.getElementById('ap-price')?.value);
+  if (!model_key || !grade || isNaN(price) || price <= 0) { showToast('All fields are required', 'error'); return; }
+  try {
+    await api('POST', '/api/retail-prices', { model_key, grade, retail_price: price });
+    showToast('✓ Price added');
+    closeModal();
+    renderPricing();
+  } catch(e) { showToast(e.message, 'error'); }
 }
 
 async function savePriceOverride(modelKey, grade, existingId) {
