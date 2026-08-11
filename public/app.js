@@ -2462,6 +2462,33 @@ async function renderUsers() {
 
 function generateSKU(model, storage, ram) {
   const m = (model || '').toUpperCase();
+
+  // Year lookup for models that don't embed the year in parentheses
+  const YEAR_MAP = {
+    'IPHONE 11 PRO MAX': '2019', 'IPHONE 11 PRO': '2019', 'IPHONE 11': '2019',
+    'IPHONE 12 PRO MAX': '2020', 'IPHONE 12 PRO': '2020', 'IPHONE 12 MINI': '2020', 'IPHONE 12': '2020',
+    'IPHONE 13 PRO MAX': '2021', 'IPHONE 13 PRO': '2021', 'IPHONE 13 MINI': '2021', 'IPHONE 13': '2021',
+    'IPHONE 14 PRO MAX': '2022', 'IPHONE 14 PRO': '2022', 'IPHONE 14 PLUS': '2022', 'IPHONE 14': '2022',
+    'IPHONE 15 PRO MAX': '2023', 'IPHONE 15 PRO': '2023', 'IPHONE 15 PLUS': '2023', 'IPHONE 15': '2023',
+    'IPHONE 16 PRO MAX': '2024', 'IPHONE 16 PRO': '2024', 'IPHONE 16 PLUS': '2024', 'IPHONE 16': '2024',
+    'IPHONE SE': '2022',
+    'GALAXY S25 ULTRA': '2025', 'GALAXY S25+': '2025', 'GALAXY S25': '2025',
+    'GALAXY S24 ULTRA': '2024', 'GALAXY S24+': '2024', 'GALAXY S24': '2024',
+    'GALAXY S23 FE': '2023', 'GALAXY S23 ULTRA': '2023', 'GALAXY S23': '2023',
+    'GALAXY Z FLIP7': '2025', 'GALAXY Z FLIP6': '2024', 'GALAXY Z FLIP5': '2023',
+    'GALAXY Z FOLD7': '2025', 'GALAXY Z FOLD6': '2024', 'GALAXY Z FOLD5': '2023',
+    'GOOGLE PIXEL 9 PRO XL': '2024', 'GOOGLE PIXEL 9 PRO FOLD': '2024', 'GOOGLE PIXEL 9 PRO': '2024', 'GOOGLE PIXEL 9': '2024',
+    'GOOGLE PIXEL 8 PRO': '2023', 'GOOGLE PIXEL 8': '2023',
+    'SURFACE LAPTOP 5': '2022', 'SURFACE LAPTOP 4': '2021', 'SURFACE LAPTOP 3': '2019',
+  };
+
+  // Find year — parenthesised year wins, then lookup by longest match
+  let year = m.match(/\((\d{4})\)/)?.[1] || '';
+  if (!year) {
+    const match = Object.keys(YEAR_MAP).sort((a,b)=>b.length-a.length).find(k => m.includes(k));
+    if (match) year = YEAR_MAP[match];
+  }
+
   let abbr = '';
   if (m.includes('MACBOOK PRO')) abbr = 'MBP';
   else if (m.includes('MACBOOK AIR')) abbr = 'MBA';
@@ -2469,12 +2496,11 @@ function generateSKU(model, storage, ram) {
     const rest = m.replace(/.*IPHONE\s*/,'').replace(/\s+PRO\s+MAX/,'PM').replace(/\s+PRO/,'P').replace(/\s+PLUS/,'+').replace(/\s+MAX/,'MX').replace(/\s+MINI/,'M').split(/\s/)[0];
     abbr = 'IP' + rest;
   }
-  else if (m.includes('GALAXY')) abbr = 'SAM-' + m.replace(/.*GALAXY\s*/,'').split(/\s/)[0];
-  else if (m.includes('PIXEL')) abbr = 'PXL-' + m.replace(/.*PIXEL\s*/,'').split(/\s/)[0];
-  else if (m.includes('SURFACE')) abbr = 'SRF-' + m.replace(/.*SURFACE\s*/,'').split(/\s/)[0];
+  else if (m.includes('GALAXY')) abbr = 'SAM-' + m.replace(/.*GALAXY\s*/,'').split(/[\s(]/)[0];
+  else if (m.includes('PIXEL')) abbr = 'PXL-' + m.replace(/.*PIXEL\s*/,'').split(/[\s(]/)[0];
+  else if (m.includes('SURFACE')) abbr = 'SRF-' + m.replace(/.*SURFACE\s*/,'').split(/[\s(]/)[0];
   else abbr = m.replace(/[^A-Z0-9]/g,'').slice(0,6);
 
-  const year = m.match(/\((\d{4})\)/)?.[1] || '';
   const chip = m.match(/\b(M[123X](?:PRO|MAX|ULTRA)?)\b/)?.[1] || '';
   const screenInch = m.match(/(\d+(?:\.\d+)?)["""]/)?.[1];
   const screenPart = screenInch ? `${screenInch}"` : '';
