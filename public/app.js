@@ -2460,6 +2460,28 @@ async function renderUsers() {
   } catch(ex) { el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`; }
 }
 
+function generateSKU(model, storage, ram) {
+  const m = (model || '').toUpperCase();
+  let abbr = '';
+  if (m.includes('MACBOOK PRO')) abbr = 'MBP';
+  else if (m.includes('MACBOOK AIR')) abbr = 'MBA';
+  else if (m.includes('IPHONE')) {
+    const rest = m.replace(/.*IPHONE\s*/,'').replace(/\s+PRO\s+MAX/,'PM').replace(/\s+PRO/,'P').replace(/\s+PLUS/,'+').replace(/\s+MAX/,'MX').replace(/\s+MINI/,'M').split(/\s/)[0];
+    abbr = 'IP' + rest;
+  }
+  else if (m.includes('GALAXY')) abbr = 'SAM-' + m.replace(/.*GALAXY\s*/,'').split(/\s/)[0];
+  else if (m.includes('PIXEL')) abbr = 'PXL-' + m.replace(/.*PIXEL\s*/,'').split(/\s/)[0];
+  else if (m.includes('SURFACE')) abbr = 'SRF-' + m.replace(/.*SURFACE\s*/,'').split(/\s/)[0];
+  else abbr = m.replace(/[^A-Z0-9]/g,'').slice(0,6);
+
+  const year = m.match(/\((\d{4})\)/)?.[1] || '';
+  const chip = m.match(/\b(M[123X](?:PRO|MAX|ULTRA)?)\b/)?.[1] || '';
+  const screenInch = m.match(/(\d+(?:\.\d+)?)["""]/)?.[1];
+  const screenPart = screenInch ? `${screenInch}"` : '';
+
+  return [abbr, screenPart, year, chip, ram, storage].filter(Boolean).join('-').replace(/--+/g,'-');
+}
+
 async function renderPricing() {
   const el = document.getElementById('screen-pricing');
   el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices shown on the shop per model and grade</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
@@ -2495,9 +2517,11 @@ async function renderPricing() {
       const autoPrice = Math.round(avgCost * 1.20);
       const inputId = `rpo-${mk}-${sk}-${rk}-${c.grade}`.replace(/[^a-z0-9-]/g,'_');
       const specs = [c.storage, c.ram].filter(Boolean).join(' · ');
+      const sku = generateSKU(c.model, c.storage, c.ram);
       return `<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:9px 10px;font-weight:600">${esc(c.model)}</td>
         <td style="padding:9px 10px;color:var(--muted);font-size:12px">${specs||'—'}</td>
+        <td style="padding:9px 10px;font-family:monospace;font-size:11px;color:var(--muted);white-space:nowrap">${sku}</td>
         <td style="padding:9px 10px"><span style="background:${GRADE_COLORS[c.grade]||'#888'};color:#fff;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700">Grade ${c.grade}</span></td>
         <td style="padding:9px 10px;color:var(--muted)">$${avgCost}</td>
         <td style="padding:9px 10px">$${autoPrice} <span style="font-size:11px;color:var(--muted)">(cost ×1.2)</span></td>
@@ -2524,6 +2548,7 @@ async function renderPricing() {
           <thead><tr style="border-bottom:2px solid var(--border);background:var(--bg)">
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Model</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Storage · RAM</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">SKU</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Grade</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Avg Cost</th>
             <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Auto Price</th>
