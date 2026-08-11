@@ -52,6 +52,10 @@ app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModifi
   if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   }
+  if (filePath.includes('/images/')) {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
 }}));
 
 // ─── PUBLIC SHOP INVENTORY CORS (NEW) ──────────────────────────────────────
@@ -730,6 +734,40 @@ async function initDB() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS retail_prices (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      model_key VARCHAR(200) NOT NULL,
+      grade CHAR(1) NOT NULL,
+      retail_price DECIMAL(10,2) NOT NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_model_grade (model_key, grade)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_specs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      model_key VARCHAR(200) NOT NULL,
+      spec_name VARCHAR(100) NOT NULL,
+      spec_value VARCHAR(500) NOT NULL,
+      sort_order INT DEFAULT 0,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_model_spec (model_key, spec_name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS coupons (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      code VARCHAR(50) NOT NULL UNIQUE,
+      discount_pct DECIMAL(5,2) NOT NULL,
+      description VARCHAR(255),
+      active TINYINT(1) DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
   try {
     await pool.query(`ALTER TABLE returns ADD COLUMN sku VARCHAR(500) AFTER order_id`);
   } catch (e) { /* column already exists */ }
@@ -743,7 +781,8 @@ async function initDB() {
   } catch (e) { /* already exists */ }
 
   // Auto-migrate new columns
-  for (const col of ['processor VARCHAR(255)', 'screen_size VARCHAR(50)', 'model_variant VARCHAR(50)']) {
+  for (const col of ['processor VARCHAR(255)', 'screen_size VARCHAR(50)', 'model_variant VARCHAR(50)',
+    'price_override DECIMAL(10,2) DEFAULT NULL']) {
     try { await pool.query(`ALTER TABLE inventory ADD COLUMN ${col}`); } catch(e) {}
   }
   for (const col of ['screen_size VARCHAR(50)', 'year INT', 'model_variant VARCHAR(50)',
@@ -2723,12 +2762,27 @@ app.delete('/api/returns/media/:mediaId', auth, async (req, res) => {
 
 // ─── PUBLIC SHOP INVENTORY (NEW — for shop.tekhouz.com) ────────────────────────
 // No auth. CORS-restricted (see middleware near top of file). Strips
-// GET /api/shop/images — public, returns all custom product images
+// Migrate product_images to multi-image (id PK, drop unique model_key constraint)
+(async () => {
+  try {
+    const cols = await dbAll("SHOW COLUMNS FROM product_images");
+    const hasId = cols.some(c => c.Field === 'id');
+    if (!hasId) {
+      await dbRun("ALTER TABLE product_images ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY FIRST");
+      await dbRun("ALTER TABLE product_images DROP INDEX model_key").catch(() => {});
+    }
+  } catch(e) {}
+})();
+
+// GET /api/shop/images — public, returns {model_key: [url, ...]}
 app.get('/api/shop/images', async (req, res) => {
   try {
-    const rows = await dbAll('SELECT model_key, image_url FROM product_images ORDER BY model_key');
+    const rows = await dbAll('SELECT model_key, image_url FROM product_images ORDER BY model_key, id');
     const map = {};
-    rows.forEach(r => { map[r.model_key] = r.image_url; });
+    rows.forEach(r => {
+      if (!map[r.model_key]) map[r.model_key] = [];
+      map[r.model_key].push(r.image_url);
+    });
     res.json(map);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2736,28 +2790,64 @@ app.get('/api/shop/images', async (req, res) => {
 // GET /api/product-images — admin
 app.get('/api/product-images', auth, async (req, res) => {
   try {
-    const rows = await dbAll('SELECT model_key, image_url, updated_at FROM product_images ORDER BY model_key');
+    const rows = await dbAll('SELECT id, model_key, image_url, updated_at FROM product_images ORDER BY model_key, id');
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/product-images — admin upsert
+// POST /api/product-images — admin add image
 app.post('/api/product-images', auth, async (req, res) => {
   try {
     const { model_key, image_url } = req.body;
     if (!model_key || !image_url) return res.status(400).json({ error: 'model_key and image_url required' });
-    await dbRun(
-      'INSERT INTO product_images (model_key, image_url) VALUES (?,?) ON DUPLICATE KEY UPDATE image_url=VALUES(image_url)',
+    const result = await dbRun(
+      'INSERT INTO product_images (model_key, image_url) VALUES (?,?)',
       [model_key.toLowerCase().trim(), image_url.trim()]
+    );
+    res.json({ ok: true, id: result.insertId });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/product-images/:id — admin delete by row id
+app.delete('/api/product-images/:id', auth, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM product_images WHERE id = ?', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Retail Prices ────────────────────────────────────────────────────────────
+app.get('/api/shop/retail-prices', async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT model_key, grade, retail_price FROM retail_prices');
+    const map = {};
+    rows.forEach(r => { map[`${r.model_key.toLowerCase()}|${r.grade}`] = parseFloat(r.retail_price); });
+    res.json(map);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/retail-prices', auth, async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT id, model_key, grade, retail_price, updated_at FROM retail_prices ORDER BY model_key, grade');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/retail-prices', auth, async (req, res) => {
+  try {
+    const { model_key, grade, retail_price } = req.body;
+    if (!model_key || !grade || retail_price == null) return res.status(400).json({ error: 'model_key, grade, retail_price required' });
+    await dbRun(
+      'INSERT INTO retail_prices (model_key, grade, retail_price) VALUES (?,?,?) ON DUPLICATE KEY UPDATE retail_price=VALUES(retail_price)',
+      [model_key.toLowerCase().trim(), grade.toUpperCase().trim(), parseFloat(retail_price)]
     );
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// DELETE /api/product-images/:key — admin
-app.delete('/api/product-images/:key', auth, async (req, res) => {
+app.delete('/api/retail-prices/:id', auth, async (req, res) => {
   try {
-    await dbRun('DELETE FROM product_images WHERE model_key = ?', [req.params.key]);
+    await dbRun('DELETE FROM retail_prices WHERE id = ?', [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2797,6 +2887,84 @@ app.delete('/api/condition-photos/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// GET /api/shop/specs — public, returns specs keyed by model_key
+app.get('/api/shop/specs', async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT model_key, spec_name, spec_value, sort_order FROM product_specs ORDER BY model_key, sort_order, spec_name');
+    const out = {};
+    for (const r of rows) {
+      if (!out[r.model_key]) out[r.model_key] = [];
+      out[r.model_key].push({ name: r.spec_name, value: r.spec_value });
+    }
+    res.json(out);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /api/product-specs — admin
+app.get('/api/product-specs', auth, async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT * FROM product_specs ORDER BY model_key, sort_order, spec_name');
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/product-specs — admin upsert
+app.post('/api/product-specs', auth, async (req, res) => {
+  try {
+    const { model_key, spec_name, spec_value, sort_order } = req.body;
+    if (!model_key || !spec_name || !spec_value) return res.status(400).json({ error: 'Missing fields' });
+    await dbRun(
+      'INSERT INTO product_specs (model_key, spec_name, spec_value, sort_order) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE spec_value=VALUES(spec_value), sort_order=VALUES(sort_order)',
+      [model_key.toLowerCase().trim(), spec_name.trim(), spec_value.trim(), sort_order || 0]
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /api/product-specs/:id — admin
+app.delete('/api/product-specs/:id', auth, async (req, res) => {
+  try {
+    await dbRun('DELETE FROM product_specs WHERE id = ?', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Coupons ─────────────────────────────────────────────────────────────────
+app.get('/api/coupons', auth, async (req, res) => {
+  try { res.json(await dbAll('SELECT * FROM coupons ORDER BY created_at DESC')); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/coupons', auth, async (req, res) => {
+  try {
+    const { code, discount_pct, description } = req.body;
+    if (!code || !discount_pct) return res.status(400).json({ error: 'code and discount_pct required' });
+    const pct = parseFloat(discount_pct);
+    if (isNaN(pct) || pct <= 0 || pct > 100) return res.status(400).json({ error: 'discount_pct must be 1-100' });
+    await dbRun(
+      'INSERT INTO coupons (code, discount_pct, description) VALUES (?,?,?) ON DUPLICATE KEY UPDATE discount_pct=VALUES(discount_pct), description=VALUES(description), active=1',
+      [code.toUpperCase().trim(), pct, description || '']
+    );
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/coupons/:id', auth, async (req, res) => {
+  try { await dbRun('DELETE FROM coupons WHERE id = ?', [req.params.id]); res.json({ ok: true }); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Public — validate a coupon code (no auth, but rate-limit by IP is fine in future)
+app.post('/api/shop/coupon/validate', async (req, res) => {
+  try {
+    const code = (req.body.code || '').toUpperCase().trim();
+    if (!code) return res.status(400).json({ error: 'code required' });
+    const row = await dbGet('SELECT * FROM coupons WHERE code = ? AND active = 1', [code]);
+    if (!row) return res.status(404).json({ error: 'Invalid or expired coupon code' });
+    res.json({ code: row.code, discount_pct: parseFloat(row.discount_pct), description: row.description });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // vendor/cost/serial/IMEI data — only model/color/storage/RAM/grade/qty/price.
 app.get('/api/shop/inventory', async (req, res) => {
   try {
@@ -2809,13 +2977,14 @@ app.get('/api/shop/inventory', async (req, res) => {
         i.ram,
         COALESCE(t.overall_grade, i.grade, 'B') AS grade,
         i.price,
+        i.price_override,
         COUNT(*) AS qty
       FROM inventory i
       LEFT JOIN inventory_testing t ON i.id = t.inventory_id
       WHERE i.status IN ('available', 'fixable', 'needs_repair')
         AND i.price > 0
       GROUP BY i.device_type, i.model, i.color, i.storage, i.ram,
-               COALESCE(t.overall_grade, i.grade, 'B'), i.price
+               COALESCE(t.overall_grade, i.grade, 'B'), i.price, i.price_override
       ORDER BY i.device_type, i.model, i.price
     `);
 
@@ -2843,7 +3012,8 @@ app.get('/api/shop/inventory', async (req, res) => {
       ram: r.ram || '',
       grade: ((r.grade || 'B').toString().match(/[A-Da-d]/)?.[0] || 'B').toUpperCase(),
       qty: Number(r.qty),
-      price: Math.round(Number(r.price))
+      price: Math.round(Number(r.price)),
+      price_override: r.price_override != null ? Math.round(Number(r.price_override)) : null
     }));
 
     res.setHeader('Cache-Control', 'public, max-age=30');

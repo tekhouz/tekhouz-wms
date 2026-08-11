@@ -112,7 +112,7 @@ function nav(screen) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('screen-' + screen).classList.add('active');
   document.querySelector(`.nav-item[data-screen="${screen}"]`)?.classList.add('active');
-  const renders = { dashboard: renderDashboard, orders: renderOrders, inventory: renderInventory, returns: renderReturns, users: renderUsers, po: renderPurchaseOrders, settings: renderSettings, requisitions: renderRequisitions, 'parts-po': renderPartsPO, 'service-orders': renderServiceOrders, 'parts-inventory': renderPartsInventory };
+  const renders = { dashboard: renderDashboard, orders: renderOrders, inventory: renderInventory, returns: renderReturns, users: renderUsers, pricing: renderPricing, po: renderPurchaseOrders, settings: renderSettings, requisitions: renderRequisitions, 'parts-po': renderPartsPO, 'service-orders': renderServiceOrders, 'parts-inventory': renderPartsInventory };
   renders[screen]?.();
 }
 
@@ -2285,10 +2285,28 @@ function showEditInventoryItem(itemId) {
         <div class="form-section-title">Pricing & Other</div>
         <div class="form-grid form-grid-3">
           <div class="form-group" style="grid-column:1/-1"><label>SKU <span style="font-size:11px;color:var(--muted);font-weight:400">(auto-generated — edit to override)</span></label><input type="text" id="ei-sku" value="${esc(item.sku||'')}" placeholder="Auto-generated from specs" style="font-family:monospace"></div>
-          <div class="form-group"><label>Price ($)</label><input type="number" id="ei-price" value="${item.price||''}" step="0.01" placeholder="0.00"></div>
+          <div class="form-group"><label>Price ($) <span style="font-size:11px;color:var(--muted);font-weight:400">wholesale cost</span></label><input type="number" id="ei-price" value="${item.price||''}" step="0.01" placeholder="0.00"></div>
           <div class="form-group"><label>PO Price ($)</label><input type="number" id="ei-po_price" value="${item.po_price||''}" step="0.01" placeholder="0.00"></div>
+          <div class="form-group"><label>B2C Price Override ($) <span style="font-size:11px;color:var(--muted);font-weight:400">shown to customers</span></label><input type="number" id="ei-price_override" value="${item.price_override||''}" step="0.01" placeholder="Leave blank for auto pricing" style="border-color:${item.price_override?'var(--primary)':''}"></div>
           <div class="form-group"><label>Facility</label><input type="text" id="ei-facility" value="${esc(item.facility||'')}" placeholder="e.g. GA, CA"></div>
           <div class="form-group"><label>Remarks</label><input type="text" id="ei-remarks" value="${esc(item.remarks||'')}" placeholder="Any notes"></div>
+        </div>
+      </div>
+      <div class="form-section">
+        <div class="form-section-title">Shop Display</div>
+        <p style="font-size:12px;color:var(--muted);margin:0 0 12px">Custom image and specs shown to customers on the shop for this model.</p>
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px;color:var(--text)">Product Images <span style="font-weight:400;color:var(--muted)">(shown on shop — first image used as card photo)</span></div>
+        <div id="ei-images-list" style="margin-bottom:8px;font-size:12px;color:var(--muted)">Loading...</div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;margin-bottom:16px">
+          <input type="url" id="ei-image-url" placeholder="https://..." style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:12px;font-family:monospace">
+          <button class="btn btn-primary btn-sm" onclick="addImageFromModal('${(item.model||'').toLowerCase().replace(/"/g,'').trim()}')">Add</button>
+        </div>
+        <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--text)">Technical Specs <span style="font-weight:400;color:var(--muted)">(shown in View Specs modal on shop)</span></div>
+        <div id="ei-specs-list" style="margin-bottom:10px;font-size:12px;color:var(--muted)">Loading...</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center">
+          <input type="text" id="ei-spec-name" placeholder="Spec name e.g. Screen Size" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:12px">
+          <input type="text" id="ei-spec-value" placeholder="Value e.g. 6.1 inches" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:12px">
+          <button class="btn btn-primary btn-sm" onclick="addSpecFromModal('${(item.model||'').toLowerCase().replace(/"/g,'').trim()}')">Add</button>
         </div>
       </div>
     </div>
@@ -2296,6 +2314,82 @@ function showEditInventoryItem(itemId) {
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="doEditInventoryItem(${itemId})">Save Changes</button>
     </div>`);
+
+  // Load existing custom image and specs for this model
+  const modelKey = (item.model||'').toLowerCase().replace(/"/g,'').trim();
+  loadModalSpecs(modelKey);
+  loadModalImages(modelKey);
+}
+
+async function loadModalImages(modelKey) {
+  const el = document.getElementById('ei-images-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/product-images');
+    const mine = rows.filter(r => r.model_key === modelKey);
+    if (!mine.length) { el.innerHTML = '<span style="color:var(--muted)">No images added yet.</span>'; return; }
+    el.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px">${mine.map(r => `
+      <div style="display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;background:var(--surface-2,#f8f9fb);border:1px solid var(--border);border-radius:6px;padding:6px 10px">
+        <span style="font-family:monospace;font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.image_url}">${r.image_url}</span>
+        <button onclick="deleteImageFromModal(${r.id},'${modelKey}')" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:13px;padding:0 2px;flex-shrink:0">✕</button>
+      </div>`).join('')}</div>`;
+  } catch(e) { el.innerHTML = '<span style="color:red">Error loading images</span>'; }
+}
+
+async function addImageFromModal(modelKey) {
+  const url = document.getElementById('ei-image-url').value.trim();
+  if (!url) { showToast('Enter an image URL', 'error'); return; }
+  try {
+    await api('POST', '/api/product-images', { model_key: modelKey, image_url: url });
+    document.getElementById('ei-image-url').value = '';
+    loadModalImages(modelKey);
+    showToast('✓ Image added');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteImageFromModal(id, modelKey) {
+  try {
+    await api('DELETE', `/api/product-images/${id}`);
+    loadModalImages(modelKey);
+    showToast('✓ Removed');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function loadModalSpecs(modelKey) {
+  const el = document.getElementById('ei-specs-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/product-specs');
+    const mine = rows.filter(r => r.model_key === modelKey);
+    if (!mine.length) { el.innerHTML = '<span style="color:var(--muted)">No specs added yet.</span>'; return; }
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse">${mine.map(s=>`
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:4px 8px;color:var(--muted);width:40%">${s.spec_name}</td>
+        <td style="padding:4px 8px">${s.spec_value}</td>
+        <td style="padding:4px 8px;text-align:right"><button onclick="deleteSpecFromModal(${s.id},'${modelKey}')" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:11px">✕</button></td>
+      </tr>`).join('')}</table>`;
+  } catch(e) { el.innerHTML = '<span style="color:red">Error loading specs</span>'; }
+}
+
+async function addSpecFromModal(modelKey) {
+  const name = document.getElementById('ei-spec-name').value.trim();
+  const value = document.getElementById('ei-spec-value').value.trim();
+  if (!name || !value) { showToast('Enter spec name and value', 'error'); return; }
+  try {
+    await api('POST', '/api/product-specs', { model_key: modelKey, spec_name: name, spec_value: value, sort_order: 0 });
+    document.getElementById('ei-spec-name').value = '';
+    document.getElementById('ei-spec-value').value = '';
+    loadModalSpecs(modelKey);
+    showToast('✓ Spec added');
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteSpecFromModal(id, modelKey) {
+  try {
+    await api('DELETE', `/api/product-specs/${id}`);
+    loadModalSpecs(modelKey);
+    showToast('✓ Removed');
+  } catch(e) { showToast(e.message, 'error'); }
 }
 
 async function doEditInventoryItem(itemId) {
@@ -2315,6 +2409,8 @@ async function doEditInventoryItem(itemId) {
     sku: gv('ei-sku') || null,
     price: parseFloat(document.getElementById('ei-price')?.value) || null,
     po_price: parseFloat(document.getElementById('ei-po_price')?.value) || null,
+    price_override: document.getElementById('ei-price_override')?.value.trim()
+      ? parseFloat(document.getElementById('ei-price_override').value) : null,
     facility: gv('ei-facility'), remarks: gv('ei-remarks'),
   };
   try {
@@ -2350,27 +2446,101 @@ async function renderUsers() {
         <td><strong>${esc(u.username)}</strong></td>
         <td><span class="badge ${u.role==='admin'?'badge-pass':'badge-shipped'}">${u.role}</span></td>
         <td>${fmtDate(u.created_at)}</td>
-        <td>
-          ${u.id !== S.user.id ? `<button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button>` : '<span class="badge badge-na">Current</span>'}
-        </td>
+        <td>${u.id !== S.user.id ? `<button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">Delete</button>` : '<span class="badge badge-na">Current</span>'}</td>
       </tr>`).join('');
-
     el.innerHTML = `
       <div class="screen-header"><h2>Users</h2><p>Manage system access</p></div>
-      <div class="toolbar">
-        <div class="toolbar-right" style="margin-left:auto">
-          <button class="btn btn-primary" onclick="showAddUser()">+ Add User</button>
-        </div>
-      </div>
+      <div class="toolbar"><div class="toolbar-right" style="margin-left:auto"><button class="btn btn-primary" onclick="showAddUser()">+ Add User</button></div></div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>#</th><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
-  } catch(ex) {
-    el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
-  }
+  } catch(ex) { el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`; }
+}
+
+async function renderPricing() {
+  const el = document.getElementById('screen-pricing');
+  el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices shown on the shop per model and grade</p></div><div style="text-align:center;padding:40px"><div class="loader"></div></div>`;
+  try {
+    const [inv, retailPrices] = await Promise.all([
+      api('GET', '/api/inventory?status=available&limit=2000'),
+      api('GET', '/api/retail-prices')
+    ]);
+    const items = Array.isArray(inv) ? inv : (inv.items || []);
+    // Build unique model+grade combos
+    const seen = {};
+    items.forEach(it => {
+      const model = (it.model||'').trim();
+      const grade = (it.grade || it.condition_grade || 'B').toString().match(/[A-Da-d]/)?.[0]?.toUpperCase() || 'B';
+      const key = `${model.toLowerCase()}|${grade}`;
+      if (!seen[key]) seen[key] = { model, grade, costs: [], override: it.price_override };
+      seen[key].costs.push(Number(it.price)||0);
+    });
+    const rpMap = {};
+    retailPrices.forEach(r => { rpMap[`${r.model_key}|${r.grade}`] = { id: r.id, price: parseFloat(r.retail_price) }; });
+
+    const combos = Object.values(seen).sort((a,b) => a.model.localeCompare(b.model) || a.grade.localeCompare(b.grade));
+    const rows = combos.map(c => {
+      const avgCost = Math.round(c.costs.reduce((s,x)=>s+x,0)/c.costs.length);
+      const mk = c.model.toLowerCase();
+      const rp = rpMap[`${mk}|${c.grade}`];
+      const autoPrice = Math.round(avgCost * 1.20);
+      const effectivePrice = rp ? rp.price : autoPrice;
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:9px 10px;font-weight:600">${esc(c.model)}</td>
+        <td style="padding:9px 10px"><span style="background:${GRADE_COLORS[c.grade]||'#888'};color:#fff;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700">Grade ${c.grade}</span></td>
+        <td style="padding:9px 10px;color:var(--muted)">$${avgCost}</td>
+        <td style="padding:9px 10px">$${autoPrice} <span style="font-size:11px;color:var(--muted)">(cost ×1.2)</span></td>
+        <td style="padding:9px 10px;font-weight:700;color:${rp?'var(--green)':'var(--muted)'}">
+          ${rp ? `$${rp.price}` : '<span style="font-size:11px">auto</span>'}
+        </td>
+        <td style="padding:9px 10px">
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="number" id="rpo-${mk}-${c.grade}" value="${rp?rp.price:''}" placeholder="${autoPrice}" min="0" step="0.01"
+              style="width:90px;padding:5px 8px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+            <button class="btn btn-primary btn-sm" onclick="savePriceOverride('${mk}','${c.grade}',${rp?rp.id:0})">Save</button>
+            ${rp ? `<button class="btn btn-outline btn-sm" style="color:var(--red);border-color:var(--red)" onclick="clearPriceOverride(${rp.id},'${mk}','${c.grade}')">Clear</button>` : ''}
+          </div>
+        </td>
+      </tr>`;
+    });
+    el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices shown on the shop per model and grade</p></div>
+      <p style="color:var(--muted);font-size:13px;margin:-8px 0 16px">Set the B2C price shown on the shop for each model + grade. Leave blank to use automatic pricing (cost × 1.2).</p>
+      <div class="table-wrap">
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="border-bottom:2px solid var(--border);background:var(--bg)">
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Model</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Grade</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Avg Cost</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Auto Price</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Current B2C</th>
+            <th style="text-align:left;padding:8px 10px;font-size:12px;color:var(--muted)">Override Price</th>
+          </tr></thead>
+          <tbody>${rows.join('')}</tbody>
+        </table>
+      </div>`;
+  } catch(ex) { el.innerHTML = `<div class="screen-header"><h2>Pricing</h2><p>Manage B2C prices</p></div><div class="alert alert-error">${ex.message}</div>`; }
+}
+
+async function savePriceOverride(modelKey, grade, existingId) {
+  const price = parseFloat(document.getElementById(`rpo-${modelKey}-${grade}`)?.value);
+  if (isNaN(price) || price <= 0) { showToast('Enter a valid price', 'error'); return; }
+  try {
+    await api('POST', '/api/retail-prices', { model_key: modelKey, grade, retail_price: price });
+    showToast('✓ Price saved');
+    renderPricing();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function clearPriceOverride(id, modelKey, grade) {
+  if (!confirm(`Clear override for ${modelKey} Grade ${grade}? Will revert to auto pricing.`)) return;
+  try {
+    await api('DELETE', `/api/retail-prices/${id}`);
+    showToast('✓ Override cleared');
+    renderPricing();
+  } catch(e) { showToast(e.message, 'error'); }
 }
 
 function showAddUser() {
@@ -3304,8 +3474,11 @@ async function renderSettings() {
     }
     S.catalog = catalog;
     renderSettingsUI(catalog);
+    loadCoupons();
     loadProductImages();
     loadConditionPhotos();
+    loadRetailPrices();
+    loadProductSpecs();
   } catch(ex) {
     el.innerHTML += `<div class="alert alert-error">${ex.message}</div>`;
   }
@@ -3415,6 +3588,21 @@ function renderSettingsUI(catalog) {
 
     <div class="card" style="margin-bottom:20px">
       <div class="card-title" style="display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A2 2 0 013 12V7a4 4 0 014-4z"/></svg>
+        Coupon Codes
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin:4px 0 14px">Create discount codes customers can apply at checkout. 10–15% off recommended.</p>
+      <div id="coupons-list" style="margin-bottom:14px"><div class="loader"></div></div>
+      <div style="display:grid;grid-template-columns:130px 100px 1fr auto;gap:8px;align-items:center">
+        <input type="text" id="cp-code" placeholder="Code e.g. SAVE10" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px;text-transform:uppercase">
+        <div style="position:relative"><input type="number" id="cp-pct" placeholder="%" min="1" max="100" style="width:100%;padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px"><span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--muted);font-size:13px">%</span></div>
+        <input type="text" id="cp-desc" placeholder="Description (optional)" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="addCoupon()">Add</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px">
         <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
         Shop Product Images
       </div>
@@ -3426,6 +3614,7 @@ function renderSettingsUI(catalog) {
         <button class="btn btn-primary btn-sm" onclick="addProductImage()">Add / Update</button>
       </div>
     </div>
+
 
     <div class="card" style="margin-bottom:20px">
       <div class="card-title" style="display:flex;align-items:center;gap:8px">
@@ -3457,6 +3646,22 @@ function renderSettingsUI(catalog) {
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:20px">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px">
+        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/></svg>
+        Product Specs
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin:4px 0 14px">Add technical specifications per model (e.g. "iphone 14"). Customers can click "View Specs" on product cards to see them.</p>
+      <div id="product-specs-list" style="margin-bottom:16px"><div class="loader"></div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 60px auto;gap:8px;align-items:center">
+        <input type="text" id="ps-model" placeholder="Model key e.g. iphone 14" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <input type="text" id="ps-name" placeholder="Spec name e.g. Screen Size" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <input type="text" id="ps-value" placeholder="Value e.g. 6.1 inches" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <input type="number" id="ps-order" placeholder="Order" min="0" style="padding:7px 10px;border:1.5px solid var(--border);border-radius:var(--r);font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="addProductSpec()">Add</button>
+      </div>
+    </div>
+
     <div class="screen-header" style="margin-top:8px"><h2 style="font-size:16px">Device Models by Brand</h2><p style="font-size:12px">Built-in models (●) cannot be removed. Add custom models per brand.</p></div>
     ${modelsHtml}`;
 }
@@ -3483,6 +3688,52 @@ function removeCatalogItem(field, val) {
   if (!S.catalog?.[field]) return;
   S.catalog[field] = S.catalog[field].filter(v => v !== val);
   saveCatalog().then(() => renderSettingsUI(S.catalog));
+}
+
+// ─── Coupons ──────────────────────────────────────────────────────────────────
+async function loadCoupons() {
+  const el = document.getElementById('coupons-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/coupons');
+    if (!rows.length) { el.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">No coupons yet.</p>'; return; }
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="border-bottom:2px solid var(--border)">
+        <th style="text-align:left;padding:6px 8px;color:var(--muted)">Code</th>
+        <th style="text-align:left;padding:6px 8px;color:var(--muted)">Discount</th>
+        <th style="text-align:left;padding:6px 8px;color:var(--muted)">Description</th>
+        <th style="padding:6px 8px"></th>
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-weight:700;font-family:monospace;letter-spacing:.5px">${esc(r.code)}</td>
+        <td style="padding:8px"><span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:20px;font-size:12px;font-weight:700">${r.discount_pct}% off</span></td>
+        <td style="padding:8px;color:var(--muted)">${esc(r.description||'')}</td>
+        <td style="padding:8px;text-align:right"><button class="btn btn-outline btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteCoupon(${r.id})">Delete</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e) { el.innerHTML = `<p style="color:var(--red);font-size:13px">${e.message}</p>`; }
+}
+
+async function addCoupon() {
+  const code = document.getElementById('cp-code')?.value?.trim().toUpperCase();
+  const pct = parseFloat(document.getElementById('cp-pct')?.value);
+  const desc = document.getElementById('cp-desc')?.value?.trim();
+  if (!code || isNaN(pct)) { showToast('Code and discount % are required', 'error'); return; }
+  if (pct < 1 || pct > 100) { showToast('Discount must be 1–100%', 'error'); return; }
+  try {
+    await api('POST', '/api/coupons', { code, discount_pct: pct, description: desc });
+    document.getElementById('cp-code').value = '';
+    document.getElementById('cp-pct').value = '';
+    document.getElementById('cp-desc').value = '';
+    showToast('✓ Coupon added');
+    loadCoupons();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteCoupon(id) {
+  if (!confirm('Delete this coupon?')) return;
+  try { await api('DELETE', `/api/coupons/${id}`); showToast('✓ Deleted'); loadCoupons(); }
+  catch(e) { showToast(e.message, 'error'); }
 }
 
 async function loadProductImages() {
@@ -3527,6 +3778,53 @@ async function deleteProductImage(key) {
     await api('DELETE', `/api/product-images/${encodeURIComponent(key)}`);
     showToast('✓ Removed');
     loadProductImages();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ─── Retail Prices ────────────────────────────────────────────────────────────
+async function loadRetailPrices() {
+  const el = document.getElementById('retail-prices-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/retail-prices');
+    if (!rows.length) { el.innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0">No retail prices set yet. Products will show cost price from inventory.</p>'; return; }
+    el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="border-bottom:2px solid var(--border)">
+        <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--muted)">Model</th>
+        <th style="text-align:left;padding:6px 8px;font-weight:600;color:var(--muted)">Grade</th>
+        <th style="text-align:right;padding:6px 8px;font-weight:600;color:var(--muted)">Retail Price</th>
+        <th style="padding:6px 8px"></th>
+      </tr></thead>
+      <tbody>${rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-weight:500">${esc(r.model_key)}</td>
+        <td style="padding:8px"><span style="background:${GRADE_COLORS[r.grade]||'#888'};color:#fff;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">Grade ${esc(r.grade)}</span></td>
+        <td style="padding:8px;text-align:right;font-weight:700;color:var(--green)">$${parseFloat(r.retail_price).toLocaleString()}</td>
+        <td style="padding:8px;text-align:right"><button class="btn btn-outline btn-sm" style="color:var(--red);border-color:var(--red)" onclick="deleteRetailPrice(${r.id})">Remove</button></td>
+      </tr>`).join('')}</tbody>
+    </table>`;
+  } catch(e) { el.innerHTML = `<p style="color:var(--red);font-size:13px">${e.message}</p>`; }
+}
+
+async function addRetailPrice() {
+  const model_key = document.getElementById('rp-model')?.value?.trim().toLowerCase();
+  const grade = document.getElementById('rp-grade')?.value;
+  const retail_price = parseFloat(document.getElementById('rp-price')?.value);
+  if (!model_key || !grade || isNaN(retail_price)) { showToast('Model, grade and price are required', 'error'); return; }
+  try {
+    await api('POST', '/api/retail-prices', { model_key, grade, retail_price });
+    document.getElementById('rp-model').value = '';
+    document.getElementById('rp-price').value = '';
+    showToast('✓ Retail price saved');
+    loadRetailPrices();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteRetailPrice(id) {
+  if (!confirm('Remove this retail price?')) return;
+  try {
+    await api('DELETE', `/api/retail-prices/${id}`);
+    showToast('✓ Removed');
+    loadRetailPrices();
   } catch(e) { showToast(e.message, 'error'); }
 }
 
@@ -3588,6 +3886,55 @@ async function deleteConditionPhoto(id) {
     await api('DELETE', `/api/condition-photos/${id}`);
     showToast('✓ Removed');
     loadConditionPhotos();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+// ─── Product Specs ─────────────────────────────────────────────────────────────
+async function loadProductSpecs() {
+  const el = document.getElementById('product-specs-list');
+  if (!el) return;
+  try {
+    const rows = await api('GET', '/api/product-specs');
+    if (!rows.length) { el.innerHTML = '<p style="color:var(--muted);font-size:13px">No specs yet.</p>'; return; }
+    // Group by model_key
+    const grouped = {};
+    rows.forEach(r => { if (!grouped[r.model_key]) grouped[r.model_key] = []; grouped[r.model_key].push(r); });
+    el.innerHTML = Object.entries(grouped).map(([model, specs]) => `
+      <div style="margin-bottom:14px">
+        <div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--text)">${model}</div>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          ${specs.map(s => `<tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:5px 8px;color:var(--muted);width:35%">${s.spec_name}</td>
+            <td style="padding:5px 8px">${s.spec_value}</td>
+            <td style="padding:5px 8px;text-align:right"><button onclick="deleteProductSpec(${s.id})" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:11px">Remove</button></td>
+          </tr>`).join('')}
+        </table>
+      </div>`).join('');
+  } catch(e) { el.innerHTML = `<p style="color:red;font-size:13px">${e.message}</p>`; }
+}
+
+async function addProductSpec() {
+  const model = document.getElementById('ps-model').value.trim().toLowerCase();
+  const name = document.getElementById('ps-name').value.trim();
+  const value = document.getElementById('ps-value').value.trim();
+  const order = parseInt(document.getElementById('ps-order').value) || 0;
+  if (!model || !name || !value) { showToast('Fill in model, spec name, and value', 'error'); return; }
+  try {
+    await api('POST', '/api/product-specs', { model_key: model, spec_name: name, spec_value: value, sort_order: order });
+    showToast('✓ Spec saved');
+    document.getElementById('ps-model').value = '';
+    document.getElementById('ps-name').value = '';
+    document.getElementById('ps-value').value = '';
+    document.getElementById('ps-order').value = '';
+    loadProductSpecs();
+  } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteProductSpec(id) {
+  try {
+    await api('DELETE', `/api/product-specs/${id}`);
+    showToast('✓ Removed');
+    loadProductSpecs();
   } catch(e) { showToast(e.message, 'error'); }
 }
 
