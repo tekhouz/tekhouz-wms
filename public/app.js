@@ -2525,7 +2525,7 @@ async function renderPricing() {
       const ram = (it.ram||'').trim();
       const grade = (it.grade || it.condition_grade || 'B').toString().match(/[A-Da-d]/)?.[0]?.toUpperCase() || 'B';
       const key = `${model.toLowerCase()}|${storage.toLowerCase()}|${ram.toLowerCase()}|${grade}`;
-      if (!seen[key]) seen[key] = { model, storage, ram, grade, costs: [] };
+      if (!seen[key]) seen[key] = { model, storage, ram, grade, costs: [], sku: it.sku || '' };
       seen[key].costs.push(Number(it.price)||0);
     });
     const rpMap = {};
@@ -2543,7 +2543,7 @@ async function renderPricing() {
       const autoPrice = Math.round(avgCost * 1.20);
       const inputId = `rpo-${mk}-${sk}-${rk}-${c.grade}`.replace(/[^a-z0-9-]/g,'_');
       const specs = [c.storage, c.ram].filter(Boolean).join(' · ');
-      const sku = generateSKU(c.model, c.storage, c.ram);
+      const sku = c.sku || generateSKU(c.model, c.storage, c.ram);
       return `<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:9px 10px;font-weight:600">${esc(c.model)}</td>
         <td style="padding:9px 10px;color:var(--muted);font-size:12px">${specs||'—'}</td>
