@@ -2781,10 +2781,18 @@ app.delete('/api/returns/media/:mediaId', auth, async (req, res) => {
     const cols = await dbAll("SHOW COLUMNS FROM product_images");
     const hasId = cols.some(c => c.Field === 'id');
     if (!hasId) {
-      await dbRun("ALTER TABLE product_images ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY FIRST");
+      const pk = await dbAll("SHOW KEYS FROM product_images WHERE Key_name = 'PRIMARY'");
+      if (pk.length) {
+        // model_key is still the primary key from the original single-image schema —
+        // it has to be dropped in the same ALTER that adds the new id PK, since MySQL
+        // rejects a table having two primary keys at once.
+        await dbRun("ALTER TABLE product_images DROP PRIMARY KEY, ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY FIRST");
+      } else {
+        await dbRun("ALTER TABLE product_images ADD COLUMN id INT AUTO_INCREMENT PRIMARY KEY FIRST");
+      }
       await dbRun("ALTER TABLE product_images DROP INDEX model_key").catch(() => {});
     }
-  } catch(e) {}
+  } catch(e) { console.error('product_images id migration failed:', e.message); }
 })();
 
 // GET /api/shop/images — public, returns {model_key: [url, ...]}
